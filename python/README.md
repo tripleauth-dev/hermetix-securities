@@ -6,7 +6,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.11.0 |
+| 버전 | 0.11.1 |
 | Python | 3.10 이상 |
 | 런타임 의존성 | 0개 (표준 라이브러리만). 실시간 스트림만 선택 설치 `pip install 'hermetix[stream]'` → `websockets` + `cryptography` |
 | 라이선스 | MIT |

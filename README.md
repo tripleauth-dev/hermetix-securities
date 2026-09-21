@@ -58,10 +58,10 @@ client.get_holdings()
 
 | 언어 | 버전 | 의존성 | 설치 |
 |---|---|---|---|
-| [Python](python/README.md) | 0.11.0 | 0개 (stdlib, 3.10+) · 실시간은 `websockets` 선택 | `pip install hermetix` (실시간: `pip install 'hermetix[stream]'`) |
-| [JavaScript/TypeScript](js/README.md) | 0.11.0 | decimal.js (Node 22+) | `npm install hermetix` |
-| [Go](go/README.md) | 0.11.0 | shopspring/decimal · 웹소켓 1개 | `go get github.com/tripleauth-dev/hermetix-securities/go@v0.11.0` |
-| Kotlin/JVM (레퍼런스) | 0.11.0 | Spring Boot | JitPack — 아래 |
+| [Python](python/README.md) | 0.11.1 | 0개 (stdlib, 3.10+) · 실시간은 `websockets` 선택 | `pip install hermetix` (실시간: `pip install 'hermetix[stream]'`) |
+| [JavaScript/TypeScript](js/README.md) | 0.11.1 | decimal.js (Node 22+) | `npm install hermetix` |
+| [Go](go/README.md) | 0.11.1 | shopspring/decimal · 웹소켓 1개 | `go get github.com/tripleauth-dev/hermetix-securities/go@v0.11.1` |
+| Kotlin/JVM (레퍼런스) | 0.11.1 | Spring Boot | JitPack — 아래 |
 
 ```kotlin
 // settings.gradle.kts
@@ -69,8 +69,8 @@ repositories { mavenCentral(); maven("https://jitpack.io") }
 
 // build.gradle.kts
 dependencies {
-    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.0")   // 전략 봇 (연결 계층 포함)
-    // implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-broker:0.11.0") // 연결 계층만
+    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.1")   // 전략 봇 (연결 계층 포함)
+    // implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-broker:0.11.1") // 연결 계층만
 }
 ```
 
@@ -261,6 +261,7 @@ hermetix:
 
 | 버전 | 내용 |
 |---|---|
+| 0.11.1 | 저장소 이동 — `tripleauth-dev/hermetix-securities`. Go 모듈 경로·JitPack 좌표가 새 이름으로 바뀌어 새 태그 필요 |
 | 0.11.0 | **브로커 팩토리** `hermetix.next(...)` — 증권사 ID 한 토큰과 통일된 자격 증명으로 생성 ([규약](docs/broker-factory.md)). 사용량 텔레메트리 수신 엔드포인트 확정 (`https://hermetix-api-prod.tripleauth.com/v1/usage`) |
 | 0.10.0 | nh·db·ls·toss 실시간 스트림(문서 기반), KB 는 웹소켓 없음 확정. **네 언어 한 줄 설치** — PyPI·npm 등록, Go `go/v0.10.0` 태그 |
 | 0.9.0 | 호가·주문통보 채널, `StrategySpec.orderBook`, 브라켓·KIS 추적에 통보 반영 |

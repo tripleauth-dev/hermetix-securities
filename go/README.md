@@ -2,14 +2,14 @@
 
 증권사 모의투자 통합 트레이딩 프레임워크 — Go 구현. 여덟 개 증권사(넥스트·한국투자·키움·NH·DB·LS·토스·KB)를 하나의 `BrokerClient` 인터페이스로 다루고, 전략 하나를 브로커 교체 없이 어디서나 돌립니다.
 
-버전 **0.11.0** (태그 `go/v0.11.0`) · Go **1.26+** (`go.mod` 기준) · 의존성 `github.com/shopspring/decimal`, `github.com/coder/websocket`(실시간 스트림) · MIT
+버전 **0.11.1** (태그 `go/v0.11.1`) · Go **1.26+** (`go.mod` 기준) · 의존성 `github.com/shopspring/decimal`, `github.com/coder/websocket`(실시간 스트림) · MIT
 
 **금액에 float 를 절대 섞지 마세요.** 가격·수량은 전부 `decimal.Decimal` 입니다.
 
 ## 설치
 
 ```bash
-go get github.com/tripleauth-dev/hermetix-securities/go@v0.11.0
+go get github.com/tripleauth-dev/hermetix-securities/go@v0.11.1
 ```
 
 ```go
@@ -22,7 +22,7 @@ import (
 client, err := hermetix.Next(hermetix.Credentials{APIKey: "pk_test_…", APISecret: "sk_test_…", Account: "acc_main"})
 ```
 
-모노레포의 `go/` 하위 모듈이라 태그가 `go/v0.11.0` 형식입니다. 패키지 이름은 `hermetix` 로 별칭을 두는 것을 권장합니다.
+모노레포의 `go/` 하위 모듈이라 태그가 `go/v0.11.1` 형식입니다. 패키지 이름은 `hermetix` 로 별칭을 두는 것을 권장합니다.
 
 ## 5분 빠른 시작 — 전략 봇
 
