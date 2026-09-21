@@ -106,4 +106,18 @@ hermetix:
 | `toss` | ⚠️ | ⚠️ | ⚠️ | 실전 전용. 구독 집합 전체를 배열 하나로 선언, Bearer 핸드셰이크, 60초 `PING`. 계정당 연결 2개·구독 100개·선언 5회/초 |
 | `kb` | ❌ | ❌ | ❌ | 개인 오픈베타 명세(2026-09) 전부 REST — 폴링 |
 
+### 채널 코드·접속 주소·한도
+
+| 증권사 | 체결가 | 호가 | 주문통보 | 접속 주소 (모의 / 실전) | 세션·구독 한도 |
+|---|---|---|---|---|---|
+| `kis` | `H0STCNT0` | `H0STASP0` | `H0STCNI9` 모의 / `H0STCNI0` 실전 | `ws://ops.koreainvestment.com:31000` / `:21000` (TLS 없음) | 접속키는 접속마다 `/oauth2/Approval` 로 발급. 통보 프레임은 AES-256-CBC, key·iv 는 구독 응답에 실림 |
+| `kiwoom` | `0B` | `0D` | `00` | `wss://mockapi.kiwoom.com:10000/api/dostk/websocket` / `wss://api.kiwoom.com:10000/…` | REST 토큰으로 `LOGIN` 후 `REG`. 통보는 계좌 단위 등록 |
+| `nh` | `oc` KRX / `nc` NXT / `mc` 통합 | `ob` / `nb` / `mb` | `d2` `d3` | `wss://moapi.nhplug.com:17070/websocket` / `wss://api.nhplug.com:7070/websocket` | 세션당 등록 10건(SDK 실측) ~ 30건(공식), 앱키당 세션 2개. 운영 서버가 중간 CA 를 보내지 않아 JVM·Go 트러스트 문제가 있을 수 있음 |
+| `db` | `S00` | `S01` | `IS0` 접수 / `IS1` 체결 | `wss://openapi.dbsec.co.kr:17070/websocket` / `:7070/websocket` | 접속 후 10초 안에 첫 전송 필수(어댑터가 즉시 구독). 계좌당 세션 2개, 종목 50개, 접속 6회/분. 통보는 해제 메시지가 없어 세션 종료가 곧 해제. `tr_key` 는 `"J 005930"` 형식 |
+| `ls` | `S3_` KOSPI + `K3_` KOSDAQ | `H1_` + `HA_` | `SC0` 접수 · `SC1` 체결 · `SC2` 정정 · `SC3` 취소 · `SC4` 거부 | `wss://openapi.ls-sec.co.kr:29443/websocket` / `:9443/websocket` | 서버가 시장을 판별하지 않아 종목마다 KOSPI·KOSDAQ TR 을 둘 다 등록(등록 수 2배). 토큰은 익일 07:00 만료라 재접속 시 새 토큰. 세션·등록 한도는 문서에 없음 |
+| `toss` | `trade:kr` / `trade:us` | `orderbook:kr` / `orderbook:us` | `personal:order` | `wss://openapi-ws.tossinvest.com/ws/v1` (실전 전용, Bearer 핸드셰이크) | 구독 집합 전체를 배열 하나로 선언하며 변경은 200ms 동안 합침. 계정당 연결 2개(3번째가 오면 가장 오래된 것 종료), 구독 100개, 선언 5회/초. 180초 무송신 시 끊겨 60초마다 `PING`. 체결량은 누적 스냅샷의 차이 |
+| `next`, `kb` | 없음 | 없음 | 없음 | 웹소켓 스펙 없음 | 폴링만 |
+
+프레임 파서와 골든 픽스처는 `conformance/fixtures/*.json` 의 `stream` 섹션에 있고, `measured: false` 인 픽스처는 문서 예시에서 재구성한 값입니다.
+
 ⚠️ 항목은 공식 문서·SDK·AsyncAPI 예시로 만든 파서라 필드 해석이 틀릴 수 있습니다. 해당 증권사 계좌가 있다면 각 언어의 스모크 테스트(`HERMETIX_RAW_DUMP` 로 원시 프레임 덤프)를 돌려 [새 증권사 요청 이슈](../../../issues/new?template=broker-request.md)로 프레임을 보내 주세요. 실측 프레임으로 픽스처를 교체하면 ✅ 로 올라갑니다. 프레임 샘플과 기대값은 [컨포먼스 픽스처](../conformance/README.md)의 `stream` 섹션에 있습니다.
