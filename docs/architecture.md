@@ -1,6 +1,6 @@
 # 코어 아키텍처
 
-이 문서는 hermetix-trading-core 의 **내부 동작**을 설명합니다. 전략을 작성하려면 [전략 작성 가이드](strategy-guide.md)를 보세요 — 이 문서는 코어에 기여하거나 동작을 깊이 이해하려는 사람을 위한 것입니다.
+이 문서는 hermetix-securities 의 **내부 동작**을 설명합니다. 전략을 작성하려면 [전략 작성 가이드](strategy-guide.md)를 보세요 — 이 문서는 코어에 기여하거나 동작을 깊이 이해하려는 사람을 위한 것입니다.
 
 ## 설계 원칙
 
@@ -23,7 +23,7 @@ go/                <- Go 구현 (shopspring/decimal)
 jitpack.yml        <- JitPack 이 kotlin/ 에서 빌드하도록 지정
 ```
 
-의존성 좌표: `com.github.tauthdev.hermetix-trading-core:hermetix-engine` (봇) 또는 `:hermetix-broker` (연결만).
+의존성 좌표: `com.github.tripleauth-dev.hermetix-securities:hermetix-engine` (봇) 또는 `:hermetix-broker` (연결만).
 
 ## 컴포넌트 맵
 

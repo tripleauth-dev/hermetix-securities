@@ -13,14 +13,14 @@
     "kiwoom",
     "websocket"
   ],
-  "homepage": "https://github.com/tauthdev/hermetix-trading-core/tree/main/js",
+  "homepage": "https://github.com/tripleauth-dev/hermetix-securities/tree/main/js",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tauthdev/hermetix-trading-core.git",
+    "url": "git+https://github.com/tripleauth-dev/hermetix-securities.git",
     "directory": "js"
   },
   "bugs": {
-    "url": "https://github.com/tauthdev/hermetix-trading-core/issues"
+    "url": "https://github.com/tripleauth-dev/hermetix-securities/issues"
   },
   "type": "module",
   "main": "./dist/src/index.js",

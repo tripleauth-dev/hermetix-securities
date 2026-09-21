@@ -22,9 +22,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/tauthdev/hermetix-trading-core/tree/main/python"
-Repository = "https://github.com/tauthdev/hermetix-trading-core"
-Issues = "https://github.com/tauthdev/hermetix-trading-core/issues"
+Homepage = "https://github.com/tripleauth-dev/hermetix-securities/tree/main/python"
+Repository = "https://github.com/tripleauth-dev/hermetix-securities"
+Issues = "https://github.com/tripleauth-dev/hermetix-securities/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "websockets>=12", "cryptography>=42"]

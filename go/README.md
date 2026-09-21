@@ -9,13 +9,13 @@
 ## 설치
 
 ```bash
-go get github.com/tauthdev/hermetix-trading-core/go@v0.11.0
+go get github.com/tripleauth-dev/hermetix-securities/go@v0.11.0
 ```
 
 ```go
 import (
     "github.com/shopspring/decimal"
-    hermetix "github.com/tauthdev/hermetix-trading-core/go"
+    hermetix "github.com/tripleauth-dev/hermetix-securities/go"
 )
 
 // 브로커 ID 한 토큰만 바꾸면 증권사가 바뀝니다 (docs/broker-factory.md)
@@ -35,7 +35,7 @@ import (
     "os"
 
     "github.com/shopspring/decimal"
-    hermetix "github.com/tauthdev/hermetix-trading-core/go"
+    hermetix "github.com/tripleauth-dev/hermetix-securities/go"
 )
 
 type MyStrategy struct{}
@@ -306,7 +306,7 @@ go run ./cmd/smoke next       # 실서버 스모크 (next | kis | kiwoom)
 
 새 어댑터는 `hermetix.VerifyBrokerConformance(broker, hermetix.ConformanceScenario{...})` 로 공통 규약을 검증합니다. 네 언어가 같은 [골든 픽스처](../conformance/README.md)를 재생하므로 포팅 간 동작이 일치합니다.
 
-⚠️ 미검증 브로커(nh·db·ls·toss·kb 와 kis·kiwoom 의 주문 통보)는 메인테이너가 계좌를 갖고 있지 않아 실측을 못 했습니다. 해당 증권사 계좌가 있다면 스모크를 돌려 [새 브로커 요청 이슈](https://github.com/tauthdev/hermetix-trading-core/issues/new?template=broker-request.md)로 결과(응답 프레임)를 알려 주세요. 실측 프레임으로 픽스처를 교체하고 ✅ 로 승격합니다.
+⚠️ 미검증 브로커(nh·db·ls·toss·kb 와 kis·kiwoom 의 주문 통보)는 메인테이너가 계좌를 갖고 있지 않아 실측을 못 했습니다. 해당 증권사 계좌가 있다면 스모크를 돌려 [새 브로커 요청 이슈](https://github.com/tripleauth-dev/hermetix-securities/issues/new?template=broker-request.md)로 결과(응답 프레임)를 알려 주세요. 실측 프레임으로 픽스처를 교체하고 ✅ 로 승격합니다.
 
 ## 공식 전략 예제
 
@@ -324,7 +324,7 @@ HERMETIX_BROKER=kis  KIS_APPKEY=... KIS_APPSECRET=... KIS_CANO=...  go run ./cmd
 ```
 
 ```go
-import "github.com/tauthdev/hermetix-trading-core/go/examples"
+import "github.com/tripleauth-dev/hermetix-securities/go/examples"
 
 strategy := examples.NewGridStrategy()
 strategy.Symbols = []string{"005930"}

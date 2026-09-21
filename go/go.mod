@@ -1,4 +1,4 @@
-module github.com/tauthdev/hermetix-trading-core/go
+module github.com/tripleauth-dev/hermetix-securities/go
 
 go 1.26.5
 

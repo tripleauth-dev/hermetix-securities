@@ -5,8 +5,8 @@ plugins {
 }
 
 subprojects {
-    // JitPack 멀티모듈 좌표(com.github.tauthdev.hermetix-trading-core:모듈명)와 로컬 배포를 일치시킨다
-    group = "com.github.tauthdev.hermetix-trading-core"
+    // JitPack 멀티모듈 좌표(com.github.tripleauth-dev.hermetix-securities:모듈명)와 로컬 배포를 일치시킨다
+    group = "com.github.tripleauth-dev.hermetix-securities"
     version = "0.11.0"
 
     apply(plugin = "org.jetbrains.kotlin.jvm")

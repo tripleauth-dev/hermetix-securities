@@ -280,7 +280,7 @@ node dist/tests/smoke.js kiwoom
 
 스모크는 체결되지 않을 지정가(현재가의 80%)로 1주 매수 후 즉시 취소합니다. 모의 계좌에서만 쓰세요.
 
-⚠️ 미검증 브로커(nh·db·ls·toss·kb)와 문서 기반 스트림은 해당 증권사 계좌가 있는 사용자의 실측 제보로 승격합니다. 계좌가 있으시면 [새 브로커 요청 이슈](https://github.com/tauthdev/hermetix-trading-core/issues/new?template=broker-request.md)로 실측 결과를 알려 주세요 — 픽스처를 실측 프레임으로 교체하고 README 상태를 올립니다.
+⚠️ 미검증 브로커(nh·db·ls·toss·kb)와 문서 기반 스트림은 해당 증권사 계좌가 있는 사용자의 실측 제보로 승격합니다. 계좌가 있으시면 [새 브로커 요청 이슈](https://github.com/tripleauth-dev/hermetix-securities/issues/new?template=broker-request.md)로 실측 결과를 알려 주세요 — 픽스처를 실측 프레임으로 교체하고 README 상태를 올립니다.
 
 ## 공식 전략 예제
 

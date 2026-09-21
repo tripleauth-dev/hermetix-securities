@@ -1,6 +1,6 @@
 # 전략 작성 가이드
 
-이 문서는 hermetix-trading-core 위에서 전략을 작성하는 방법을 처음부터 끝까지 다룹니다. 빠른 시작은 [hermetix-strategy-template](https://github.com/tauthdev/hermetix-strategy-template) README 를, 이 문서는 그다음 단계의 상세 레퍼런스로 보세요.
+이 문서는 hermetix-securities 위에서 전략을 작성하는 방법을 처음부터 끝까지 다룹니다. 빠른 시작은 [hermetix-strategy-template](https://github.com/tauthdev/hermetix-strategy-template) README 를, 이 문서는 그다음 단계의 상세 레퍼런스로 보세요.
 
 ## 1. 전략의 생명주기
 

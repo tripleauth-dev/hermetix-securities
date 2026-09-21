@@ -9,7 +9,7 @@ import (
 	"os"
 
 	"github.com/shopspring/decimal"
-	hermetix "github.com/tauthdev/hermetix-trading-core/go"
+	hermetix "github.com/tripleauth-dev/hermetix-securities/go"
 )
 
 func main() {

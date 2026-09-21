@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"os"
 
-	hermetix "github.com/tauthdev/hermetix-trading-core/go"
-	"github.com/tauthdev/hermetix-trading-core/go/examples"
+	hermetix "github.com/tripleauth-dev/hermetix-securities/go"
+	"github.com/tripleauth-dev/hermetix-securities/go/examples"
 )
 
 func main() {

@@ -1,6 +1,6 @@
 # 기여 가이드
 
-hermetix-trading-core 는 증권사 모의투자 API(넥스트증권·한국투자·키움)로 자동매매 전략을 만드는 커뮤니티 프레임워크입니다. 기여를 환영합니다.
+hermetix-securities 는 증권사 모의투자 API(넥스트증권·한국투자·키움)로 자동매매 전략을 만드는 커뮤니티 프레임워크입니다. 기여를 환영합니다.
 
 ## 어디에 기여하나요?
 
@@ -18,8 +18,8 @@ hermetix-trading-core 는 증권사 모의투자 API(넥스트증권·한국투�
 - JDK 17, Kotlin 1.9 (Gradle Wrapper 포함 — 로컬 Gradle 설치 불필요)
 
 ```bash
-git clone https://github.com/tauthdev/hermetix-trading-core.git
-cd hermetix-trading-core
+git clone https://github.com/tripleauth-dev/hermetix-securities.git
+cd hermetix-securities
 
 # Kotlin (레퍼런스 구현)
 cd kotlin

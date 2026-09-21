@@ -6,7 +6,7 @@
 
 ccxt 가 거래소에 하는 일을 증권사에 합니다. 증권사는 ID 한 토큰으로 고르고, 전략은 한 번만 씁니다. 키는 언제나 당신의 기기에서만 쓰입니다.
 
-[![JitPack](https://jitpack.io/v/tauthdev/hermetix-trading-core.svg)](https://jitpack.io/#tauthdev/hermetix-trading-core)
+[![JitPack](https://jitpack.io/v/tripleauth-dev/hermetix-securities.svg)](https://jitpack.io/#tripleauth-dev/hermetix-securities)
 [![npm](https://img.shields.io/npm/v/hermetix.svg)](https://www.npmjs.com/package/hermetix)
 [![PyPI](https://img.shields.io/pypi/v/hermetix.svg)](https://pypi.org/project/hermetix/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -60,7 +60,7 @@ client.get_holdings()
 |---|---|---|---|
 | [Python](python/README.md) | 0.11.0 | 0개 (stdlib, 3.10+) · 실시간은 `websockets` 선택 | `pip install hermetix` (실시간: `pip install 'hermetix[stream]'`) |
 | [JavaScript/TypeScript](js/README.md) | 0.11.0 | decimal.js (Node 22+) | `npm install hermetix` |
-| [Go](go/README.md) | 0.11.0 | shopspring/decimal · 웹소켓 1개 | `go get github.com/tauthdev/hermetix-trading-core/go@v0.11.0` |
+| [Go](go/README.md) | 0.11.0 | shopspring/decimal · 웹소켓 1개 | `go get github.com/tripleauth-dev/hermetix-securities/go@v0.11.0` |
 | Kotlin/JVM (레퍼런스) | 0.11.0 | Spring Boot | JitPack — 아래 |
 
 ```kotlin
@@ -69,8 +69,8 @@ repositories { mavenCentral(); maven("https://jitpack.io") }
 
 // build.gradle.kts
 dependencies {
-    implementation("com.github.tauthdev.hermetix-trading-core:hermetix-engine:0.11.0")   // 전략 봇 (연결 계층 포함)
-    // implementation("com.github.tauthdev.hermetix-trading-core:hermetix-broker:0.11.0") // 연결 계층만
+    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.0")   // 전략 봇 (연결 계층 포함)
+    // implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-broker:0.11.0") // 연결 계층만
 }
 ```
 

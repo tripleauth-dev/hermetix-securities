@@ -1,3 +1,3 @@
-rootProject.name = "hermetix-trading-core"
+rootProject.name = "hermetix-securities"
 
 include("hermetix-broker", "hermetix-engine")
