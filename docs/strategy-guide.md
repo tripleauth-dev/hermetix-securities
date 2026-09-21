@@ -1,6 +1,6 @@
 # 전략 작성 가이드
 
-이 문서는 hermetix-securities 위에서 전략을 작성하는 방법을 처음부터 끝까지 다룹니다. 빠른 시작은 [hermetix-strategy-template](https://github.com/tauthdev/hermetix-strategy-template) README 를, 이 문서는 그다음 단계의 상세 레퍼런스로 보세요.
+이 문서는 hermetix-securities 위에서 전략을 작성하는 방법을 처음부터 끝까지 다룹니다. 빠른 시작은 [hermetix-strategy-template](https://github.com/tripleauth-dev/hermetix-strategy-template) README 를, 이 문서는 그다음 단계의 상세 레퍼런스로 보세요.
 
 ## 1. 전략의 생명주기
 
@@ -151,7 +151,7 @@ val context = StrategyContext(
 assertThat(strategy.decide(context)).hasSize(1)
 ```
 
-실전 예시는 공식 전략 레포들의 테스트를 참고하세요: [next-larry-strategy](https://github.com/tauthdev/next-larry-strategy), [next-trend-breakout-strategy](https://github.com/tauthdev/next-trend-breakout-strategy), [next-grid-strategy](https://github.com/tauthdev/next-grid-strategy)
+실전 예시는 공식 전략 레포들의 테스트를 참고하세요: [hermetix-larry-strategy](https://github.com/tripleauth-dev/hermetix-larry-strategy), [hermetix-trend-breakout-strategy](https://github.com/tripleauth-dev/hermetix-trend-breakout-strategy), [hermetix-grid-strategy](https://github.com/tripleauth-dev/hermetix-grid-strategy)
 
 ## 8. 트러블슈팅
 

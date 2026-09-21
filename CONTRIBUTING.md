@@ -6,7 +6,7 @@ hermetix-securities 는 증권사 모의투자 API(넥스트증권·한국투자
 
 | 하고 싶은 것 | 방법 |
 |---|---|
-| 내 전략을 만들고 싶다 | 이 레포가 아니라 [hermetix-strategy-template](https://github.com/tauthdev/hermetix-strategy-template) 으로 시작하세요. 코어 수정이 필요 없습니다 |
+| 내 전략을 만들고 싶다 | 이 레포가 아니라 [hermetix-strategy-template](https://github.com/tripleauth-dev/hermetix-strategy-template) 으로 시작하세요. 코어 수정이 필요 없습니다 |
 | 만든 전략을 공유하고 싶다 | 전략 레포를 Public 으로 만들고 [Strategy Share 이슈](../../issues/new?template=strategy-share.md)로 알려주세요. README 의 커뮤니티 전략 목록에 추가합니다 |
 | 코어 버그를 찾았다 | [Bug Report 이슈](../../issues/new?template=bug_report.md) |
 | 코어에 기능을 제안하고 싶다 | [Feature Request 이슈](../../issues/new?template=feature_request.md) 로 먼저 논의 후 PR |

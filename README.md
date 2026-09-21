@@ -103,7 +103,7 @@ client.getQuotes(listOf("005930")).quotes[0].price
 
 전략은 `spec`(감시 종목·캔들·호출 주기)과 `decide()`(시그널 반환) 두 가지만 채웁니다. 엔진이 정규장 중에만 호출하고, 시그널을 주문으로 바꾸고, 익절·손절과 비상정지를 대신합니다. Python·JS·Go 의 봇 예시는 각 언어 README 의 "5분 빠른 시작" 에 있습니다. 아래는 Kotlin(Spring Boot) 입니다.
 
-> 처음이라면 [hermetix-strategy-template](https://github.com/tauthdev/hermetix-strategy-template) 을 "Use this template" 으로 복제하는 게 가장 빠릅니다.
+> 처음이라면 [hermetix-strategy-template](https://github.com/tripleauth-dev/hermetix-strategy-template) 을 "Use this template" 으로 복제하는 게 가장 빠릅니다.
 
 ```yaml
 # application.yml
@@ -248,10 +248,12 @@ hermetix:
 
 | 레포 | 전략 | 특징 |
 |---|---|---|
-| [hermetix-strategy-template](https://github.com/tauthdev/hermetix-strategy-template) | 이동평균 예제 | **여기서 시작하세요** |
-| [hermetix-larry-strategy](https://github.com/tauthdev/hermetix-larry-strategy) | 변동성 돌파 | 캔들 분석 + 손절 브라켓 |
-| [hermetix-trend-breakout-strategy](https://github.com/tauthdev/hermetix-trend-breakout-strategy) | WMA 추세선 돌파 | 지표 계산 + 익절/손절 브라켓 |
-| [hermetix-grid-strategy](https://github.com/tauthdev/hermetix-grid-strategy) | 목표가 스캘핑 | 지정가/취소 컨트롤, KRX 호환 |
+| [hermetix-strategy-template](https://github.com/tripleauth-dev/hermetix-strategy-template) | 이동평균 예제 | **여기서 시작하세요** |
+| [hermetix-larry-strategy](https://github.com/tripleauth-dev/hermetix-larry-strategy) | 변동성 돌파 | 캔들 분석 + 손절 브라켓 |
+| [hermetix-trend-breakout-strategy](https://github.com/tripleauth-dev/hermetix-trend-breakout-strategy) | WMA 추세선 돌파 | 지표 계산 + 익절/손절 브라켓 |
+| [hermetix-grid-strategy](https://github.com/tripleauth-dev/hermetix-grid-strategy) | 목표가 스캘핑 | 지정가/취소 컨트롤, KRX 호환 |
+| [hermetix-dca-strategy](https://github.com/tripleauth-dev/hermetix-dca-strategy) | 무한매수법 분할 매수 | 거래일당 1회분, 목표 수익률 청산 |
+| [hermetix-turtle-strategy](https://github.com/tripleauth-dev/hermetix-turtle-strategy) | 터틀 트레이딩 | Donchian 채널 돌파, 롱 온리 |
 
 직접 만든 전략을 공유하려면 [전략 공유 이슈](../../issues/new?template=strategy-share.md)를 올려주세요.
 
