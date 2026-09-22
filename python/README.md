@@ -52,6 +52,8 @@ client = hermetix.client("toss", api_key="...", api_secret="...", account="1")
 
 ## 5분 빠른 시작: 전략 봇
 
+처음이라면 [hermetix-strategy-template/python](https://github.com/tripleauth-dev/hermetix-strategy-template/tree/main/python) 을 복제하세요. 아래 예제 전략과 테스트가 들어 있습니다.
+
 전략은 `Strategy` 를 상속해 `spec` 과 `decide()` 만 채웁니다. 엔진이 정규장에만 `decide()` 를 부르고, 시그널을 주문으로 바꾸고, 익절과 손절을 대신 실행합니다.
 
 ```python

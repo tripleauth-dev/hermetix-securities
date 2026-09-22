@@ -32,6 +32,8 @@ const kiwoom = hermetix.kiwoom({ apiKey: "…", apiSecret: "…" });
 
 ## 5분 빠른 시작: 전략 봇
 
+처음이라면 [hermetix-strategy-template/js](https://github.com/tripleauth-dev/hermetix-strategy-template/tree/main/js) 을 복제하세요. 아래 예제 전략과 테스트가 들어 있습니다.
+
 전략은 `Strategy` 인터페이스 하나입니다. `spec` 으로 감시 종목과 호출 주기를 선언하고 `decide` 에서 시그널을 돌려주면, 주문 제출과 익절·손절과 비상정지는 엔진이 맡습니다.
 
 ```ts

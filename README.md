@@ -106,7 +106,7 @@ val quote = client.getQuotes(listOf("005930")).quotes[0]
 
 전략은 `spec` 과 `decide()` 두 가지만 채웁니다. 엔진이 정규장에만 호출하고, 시그널을 주문으로 바꾸고, 익절·손절과 비상정지를 처리합니다.
 
-처음이라면 [hermetix-strategy-template](https://github.com/tripleauth-dev/hermetix-strategy-template) 을 복제하세요. Python·JS·Go 예시는 각 언어 README 에 있습니다. 아래는 Kotlin 입니다.
+처음이라면 [hermetix-strategy-template](https://github.com/tripleauth-dev/hermetix-strategy-template) 을 복제하세요. 네 언어 폴더가 있고 예제 전략과 테스트가 들어 있습니다. 아래는 Kotlin 이고, Python·JS·Go 예시는 각 언어 README 에 있습니다.
 
 ```yaml
 # application.yml
@@ -249,7 +249,7 @@ hermetix:
 
 | 레포 | 전략 |
 |---|---|
-| [hermetix-strategy-template](https://github.com/tripleauth-dev/hermetix-strategy-template) | 이동평균 예제. 여기서 시작하세요 |
+| [hermetix-strategy-template](https://github.com/tripleauth-dev/hermetix-strategy-template) | 이동평균 예제, 네 언어. 여기서 시작하세요 |
 | [hermetix-larry-strategy](https://github.com/tripleauth-dev/hermetix-larry-strategy) | 변동성 돌파 |
 | [hermetix-trend-breakout-strategy](https://github.com/tripleauth-dev/hermetix-trend-breakout-strategy) | WMA 추세선 돌파 |
 | [hermetix-grid-strategy](https://github.com/tripleauth-dev/hermetix-grid-strategy) | 목표가 스캘핑 |

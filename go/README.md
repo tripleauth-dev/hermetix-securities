@@ -44,6 +44,8 @@ if err != nil {
 
 ## 5분 빠른 시작: 전략 봇
 
+처음이라면 [hermetix-strategy-template/go](https://github.com/tripleauth-dev/hermetix-strategy-template/tree/main/go) 을 복제하세요. 아래 예제 전략과 테스트가 들어 있습니다.
+
 `Strategy` 인터페이스의 `Spec` 과 `Decide` 두 메서드만 구현합니다. 엔진이 정규장에만 호출하고, 시그널을 주문으로 바꾸고, 익절·손절과 비상정지를 처리합니다.
 
 ```go
