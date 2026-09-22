@@ -34,7 +34,7 @@ import (
 
 const (
 	// TelemetryEndpoint - 수신 엔드포인트. 언어별로 상수 한 곳에만 있으며 사용자 설정은 없다
-	TelemetryEndpoint = "https://hermetix-api-prod.tripleauth.com/v1/usage"
+	TelemetryEndpoint = "https://service-api-prod.hermetix.dev/v1/usage"
 	// TelemetrySchema - 계약 버전
 	TelemetrySchema = 1
 	telemetrySDK    = "go"

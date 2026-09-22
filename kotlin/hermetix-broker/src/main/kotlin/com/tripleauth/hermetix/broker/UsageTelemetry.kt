@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 object UsageTelemetry {
 
-    const val ENDPOINT = "https://hermetix-api-prod.tripleauth.com/v1/usage"
+    const val ENDPOINT = "https://service-api-prod.hermetix.dev/v1/usage"
     const val SCHEMA = 1
     const val SDK_LANGUAGE = "kotlin"
     /** 요청 서명 키 (docs/telemetry.md "요청 서명") — 공개 SDK 라 비밀이 아니며 스팸·스캐너를 거르는 문턱이다 */

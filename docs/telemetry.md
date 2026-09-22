@@ -98,7 +98,7 @@ Hermetix SDK(Kotlin·Python·JS·Go)는 **어느 증권사가 얼마나 쓰이�
 - HTTP 타임아웃 연결 2초·전체 3초. 재시도 없음. 응답 본문은 읽지 않는다. 2xx 가 아니어도 버린다
 - 전송 후 카운터는 비운다. 실패한 페이로드는 다시 보내지 않는다 (누락은 허용, 중복은 없음)
 - 시간 버킷은 UTC 정시 기준. 전송 시점에 현재 진행 중인 시간 버킷도 포함해 보낸다 (서버는 같은 `installationId`+`hour`+`broker`+`environment` 를 **더해서** 집계한다)
-- 엔드포인트 기본값은 `https://hermetix-api-prod.tripleauth.com/v1/usage`. 언어별로 상수 한 곳에만 있으며 사용자 설정은 없다
+- 엔드포인트 기본값은 `https://service-api-prod.hermetix.dev/v1/usage`. 언어별로 상수 한 곳에만 있으며 사용자 설정은 없다
 - 사용자 에이전트: `hermetix-{language}/{version}`
 - 모든 전송에 위 요청 서명 헤더 3개를 싣는다
 

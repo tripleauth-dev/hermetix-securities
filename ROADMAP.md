@@ -54,7 +54,7 @@
 OpenRouter 의 모델 랭킹처럼, SDK 가 집계한 실사용량으로 **국내외 증권사 오픈 API 사용량 랭킹**을 공개한다. 계약은 [docs/telemetry.md](docs/telemetry.md).
 
 - [x] (0.11.0) 사용량 텔레메트리 — 브로커·환경·호출 종류별 건수·에러 분류·응답 시간 분포·스트림 건수·SDK 버전·설치 ID 를 시간 버킷으로 합산해 60초마다 전송. 종목·수량·가격·계좌·주문번호·키·IP 는 보내지 않음. 기본 배포본 항상 켜짐(설정 없음), 매매 경로와 분리, 새 의존성 없음. Kotlin 코어 + 네 언어 계측
-- [x] (0.11.0) `hermetix-service` (별도 레포, AWS ECS) — `POST /v1/usage` 수신·집계, `GET /v1/rankings`·`/v1/status`, 랭킹·API 현황 페이지. 수신 도메인 `https://hermetix-api-prod.tripleauth.com` 확정(2026-09-17), SDK 네 언어 엔드포인트 상수 갱신
+- [x] (0.11.0) `hermetix-service` (별도 레포, AWS ECS) — `POST /v1/usage` 수신·집계, `GET /v1/rankings`·`/v1/status`, 랭킹·API 현황 페이지. 수신 도메인 `https://service-api-prod.hermetix.dev` (2026-09-22 변경, 이전 `hermetix-api-prod.tripleauth.com`), SDK 네 언어 엔드포인트 상수 갱신
 - [ ] 랭킹 페이지 공개 — 브로커별 호출량·실전 비율·에러율·p50/p95·설치 수·언어 비중·실시간 채널 사용량, 7일/30일
 
 ## Phase E — 다언어 도달 (진행 중)

@@ -17,7 +17,7 @@ import {
 } from "./errors.js";
 import type { StreamChannel, TradingEnvironment } from "./models.js";
 
-export const TELEMETRY_ENDPOINT = "https://hermetix-api-prod.tripleauth.com/v1/usage";
+export const TELEMETRY_ENDPOINT = "https://service-api-prod.hermetix.dev/v1/usage";
 export const TELEMETRY_SCHEMA = 1;
 export const SDK_LANGUAGE = "js";
 /** 요청 서명 키 (docs/telemetry.md "요청 서명") — 공개 SDK 라 비밀이 아니며 스팸·스캐너를 거르는 문턱이다 */

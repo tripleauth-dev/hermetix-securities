@@ -27,7 +27,7 @@ from .errors import (
 )
 from .models import StreamChannel, TradingEnvironment
 
-ENDPOINT = "https://hermetix-api-prod.tripleauth.com/v1/usage"
+ENDPOINT = "https://service-api-prod.hermetix.dev/v1/usage"
 SCHEMA = 1
 SDK_LANGUAGE = "python"
 # 요청 서명 키 (docs/telemetry.md "요청 서명") — 공개 SDK 라 비밀이 아니며 스팸·스캐너를 거르는 문턱이다
