@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermetix"
-version = "0.11.1"
+version = "0.11.2"
 description = "증권사 모의투자 통합 트레이딩 프레임워크 - Python"
 readme = "README.md"
 requires-python = ">=3.10"

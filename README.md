@@ -71,7 +71,7 @@ holdings = client.get_holdings()
 repositories { mavenCentral(); maven("https://jitpack.io") }
 
 dependencies {
-    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.1")
+    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.2")
 }
 ```
 
@@ -264,6 +264,7 @@ hermetix:
 
 | 버전 | 내용 |
 |---|---|
+| 0.11.2 | 텔레메트리 수신 엔드포인트를 `service-api-prod.hermetix.dev` 로 변경 |
 | 0.11.1 | 저장소를 `tripleauth-dev/hermetix-securities` 로 이동. Go 모듈 경로와 JitPack 좌표 변경 |
 | 0.11.0 | 브로커 팩토리 `hermetix.next(...)`. 사용량 텔레메트리 수신 엔드포인트 확정 |
 | 0.10.0 | nh·db·ls·toss 실시간 스트림. PyPI·npm 등록 |
