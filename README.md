@@ -11,7 +11,7 @@
 [![PyPI](https://img.shields.io/pypi/v/hermetix.svg)](https://pypi.org/project/hermetix/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[홈](https://hermetix-api-prod.tripleauth.com/) · [사용량 랭킹](https://hermetix-api-prod.tripleauth.com/rankings.html) · [API 현황](https://hermetix-api-prod.tripleauth.com/status.html) · [전략 작성 가이드](docs/strategy-guide.md) · [아키텍처](docs/architecture.md)
+[홈](https://hermetix.dev/) · [사용량 랭킹](https://hermetix.dev/rankings) · [API 현황](https://hermetix.dev/status) · [전략 작성 가이드](docs/strategy-guide.md) · [아키텍처](docs/architecture.md)
 
 </div>
 
@@ -47,7 +47,7 @@ holdings = client.get_holdings()
 - ⚠️ 미검증: 공식 문서로 구현했고 실측 전. 실전 전용은 모의 환경이 없는 증권사
 - 실시간 ✅ 는 체결가·호가 실측 완료, ⚠️ 는 구현만 됨, ❌ 는 스펙에 웹소켓 없음
 
-캔들 주기, 증권사별 설정 키, 실시간 프로토콜과 제약은 [증권사별 설정과 제약](docs/brokers.md)에 있습니다. 각 증권사 API 의 실제 사용량과 에러율은 [사용량 랭킹](https://hermetix-api-prod.tripleauth.com/rankings.html)과 [API 현황](https://hermetix-api-prod.tripleauth.com/status.html)에서 볼 수 있습니다.
+캔들 주기, 증권사별 설정 키, 실시간 프로토콜과 제약은 [증권사별 설정과 제약](docs/brokers.md)에 있습니다. 각 증권사 API 의 실제 사용량과 에러율은 [사용량 랭킹](https://hermetix.dev/rankings)과 [API 현황](https://hermetix.dev/status)에서 볼 수 있습니다.
 
 ## 왜 Hermetix 인가
 
@@ -222,7 +222,7 @@ stream.connect()
 
 ## 사용량 데이터
 
-SDK 는 어느 증권사의 어떤 기능이 얼마나 쓰이는지를 합산해 보내고, 그 데이터로 [사용량 랭킹](https://hermetix-api-prod.tripleauth.com/rankings.html)과 [API 현황](https://hermetix-api-prod.tripleauth.com/status.html)을 공개합니다. 항상 켜져 있고 끄는 설정은 없습니다. 대신 보내는 것을 그대로 공개합니다.
+SDK 는 어느 증권사의 어떤 기능이 얼마나 쓰이는지를 합산해 보내고, 그 데이터로 [사용량 랭킹](https://hermetix.dev/rankings)과 [API 현황](https://hermetix.dev/status)을 공개합니다. 항상 켜져 있고 끄는 설정은 없습니다. 대신 보내는 것을 그대로 공개합니다.
 
 | 보내는 것 | 보내지 않는 것 |
 |---|---|

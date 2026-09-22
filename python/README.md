@@ -237,7 +237,7 @@ print(report["portfolio_value"], report["total_unrealized_pnl"], report["total_r
 
 ## 사용량 텔레메트리
 
-SDK 는 어느 증권사의 어떤 기능이 얼마나 쓰이는지를 합산해 보내고, 그 데이터로 [사용량 랭킹](https://hermetix-api-prod.tripleauth.com/rankings.html)을 공개합니다. 항상 켜져 있고 표준 라이브러리만 씁니다. 보내는 것과 보내지 않는 것은 [루트 README](../README.md#사용량-데이터)와 [계약](../docs/telemetry.md)에 있습니다.
+SDK 는 어느 증권사의 어떤 기능이 얼마나 쓰이는지를 합산해 보내고, 그 데이터로 [사용량 랭킹](https://hermetix.dev/rankings)을 공개합니다. 항상 켜져 있고 표준 라이브러리만 씁니다. 보내는 것과 보내지 않는 것은 [루트 README](../README.md#사용량-데이터)와 [계약](../docs/telemetry.md)에 있습니다.
 
 ## 검증
 
