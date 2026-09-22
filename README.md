@@ -64,7 +64,7 @@ holdings = client.get_holdings()
 |---|---|
 | [Python](python/README.md) | `pip install hermetix` |
 | [JavaScript/TypeScript](js/README.md) | `npm install hermetix` |
-| [Go](go/README.md) | `go get github.com/tripleauth-dev/hermetix-securities/go@v0.11.1` |
+| [Go](go/README.md) | `go get github.com/tripleauth-dev/hermetix-securities/go@latest` |
 | Kotlin/JVM | JitPack, 아래 |
 
 ```kotlin

@@ -7,7 +7,7 @@
 ## 설치
 
 ```bash
-go get github.com/tripleauth-dev/hermetix-securities/go@v0.11.1
+go get github.com/tripleauth-dev/hermetix-securities/go@latest
 ```
 
 ```go
