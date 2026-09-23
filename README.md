@@ -43,8 +43,10 @@ holdings = client.get_holdings()
 | <img src="https://www.google.com/s2/favicons?domain=tossinvest.com&sz=64" width="24"/> | `toss` | [토스증권](https://openapi.tossinvest.com/) | KRX · 미국 | ⚠️ | ❌ | ✅ | ⚠️ 실전 전용 |
 | <img src="https://www.google.com/s2/favicons?domain=kbsec.com&sz=64" width="24"/> | `kb` | [KB증권](https://openapi.kbsec.com/) | KRX | ❌ | ❌ | ✅ | ⚠️ 실전 전용 |
 
-- ✅ 검증: 모의 서버에서 시세·캔들·계좌·주문 전 구간 스모크 통과
+- ✅ 검증: 실서버에서 조회(시세·캔들·계좌)·주문(생성→조회→취소)·실시간(프레임 파싱) 세 단계를 모두 통과
+- 🟡 조회 검증 / 주문 검증: 세 단계 중 일부만 통과 — 어디까지인지는 [API 현황](https://hermetix.dev/status)에 표시
 - ⚠️ 미검증: 공식 문서로 구현했고 실측 전. 실전 전용은 모의 환경이 없는 증권사
+- 계좌가 있으면 `python -m hermetix.verify <broker>` 한 줄로 실측 파일을 만들어 [제보](../../issues/new?template=broker-verification.md)할 수 있습니다 — [절차](conformance/README.md#실측-제보-절차). 제보자는 아래 검증 기여자 표에 올립니다
 - 실시간 ✅ 는 체결가·호가 실측 완료, ⚠️ 는 구현만 됨, ❌ 는 스펙에 웹소켓 없음
 
 캔들 주기, 증권사별 설정 키, 실시간 프로토콜과 제약은 [증권사별 설정과 제약](docs/brokers.md)에 있습니다. 각 증권사 API 의 실제 사용량과 에러율은 [사용량 랭킹](https://hermetix.dev/rankings)과 [API 현황](https://hermetix.dev/status)에서 볼 수 있습니다.
@@ -259,6 +261,14 @@ hermetix:
 전략을 공유하려면 [전략 공유 이슈](../../issues/new?template=strategy-share.md)를 올려주세요.
 
 <!-- 커뮤니티 전략 목록 -->
+
+## 검증 기여자
+
+실측 파일을 보내 어댑터를 검증으로 올린 분들입니다.
+
+| 증권사 | 단계 | 기여자 | 일자 |
+|---|---|---|---|
+| next · kis · kiwoom | 조회·주문·실시간(kis·kiwoom) | 메인테이너 | 2026-09 |
 
 ## 릴리즈
 

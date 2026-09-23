@@ -255,7 +255,20 @@ python python/tests/smoke.py kis
 | `kis` | `KIS_APPKEY`, `KIS_APPSECRET`, `KIS_CANO` |
 | `kiwoom` | `KIWOOM_APPKEY`, `KIWOOM_SECRETKEY` |
 
-새 어댑터는 `verify_broker_conformance(client, ConformanceScenario(symbol, limit_price, quantity))` 로 표준 시나리오를 통과시키세요. 미검증 증권사의 실측 응답은 [새 증권사 요청 이슈](../.github/ISSUE_TEMPLATE/broker-request.md)로 보내주시면 픽스처를 교체합니다.
+새 어댑터는 `verify_broker_conformance(client, ConformanceScenario(symbol, limit_price, quantity))` 로 표준 시나리오를 통과시키세요.
+
+### 실측 제보 — 미검증 증권사를 검증으로 올리기
+
+계좌가 있는 증권사면 명령 하나로 실서버 검증을 돌리고 결과 파일을 [실측 제보 이슈](../.github/ISSUE_TEMPLATE/broker-verification.md)에 첨부하면 됩니다 ([절차](../conformance/README.md#실측-제보-절차)). 키·토큰·계좌번호는 파일에 쓰기 전에 가려집니다.
+
+```bash
+pip install 'hermetix[stream]'
+HERMETIX_API_KEY=... HERMETIX_API_SECRET=... HERMETIX_ACCOUNT=... python -m hermetix.verify nh
+python -m hermetix.verify toss --live --read-only      # 실전 전용 증권사는 조회만 (주문 없음)
+python -m hermetix.verify kb --live --live-orders      # 실전 주문까지: 원거리 지정가 1주 → 즉시 취소
+```
+
+시세→캔들→캘린더→계좌→보유→주문가능액→주문 목록→체결→(모의면) 주문 생성→조회→취소→(스트림 지원 시) 60초 프레임 채집 순으로 돌고, `hermetix-verify-<broker>.json` 에 실제 요청·응답과 원시 프레임을 남깁니다.
 
 ## 예제
 

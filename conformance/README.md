@@ -59,6 +59,29 @@
 - `measured` 플래그: kis·kiwoom 의 체결가(`frames`)와 `orderBook` 은 2026-09-14 모의 웹소켓 장중 실측 프레임 그대로(KIS 는 한 프레임에 여러 레코드가 이어 붙는 실제 형태). kis·kiwoom 의 `orderEvents` 와 nh·db·ls·toss 의 전 섹션은 **공식 문서·SDK·AsyncAPI 예시에서 재구성한 값**이라 `"measured": false` 로 표시합니다 — 실측 제보가 오면 실제 프레임으로 교체하고 `true` 로 올립니다
 - 각 섹션은 `frames`(브로커 원시 텍스트 프레임)와 `expected`(언어 중립 값)로 구성되며 `orderBook`(asks/bids 가격·잔량·총잔량)·`orderEvents`(orderId·type·side·수량·가격·잔량·원주문) 하위 섹션이 같은 규칙을 따릅니다. next·kb 는 웹소켓이 없어 `stream` 섹션이 없습니다
 
+## 실측 제보 절차 (⚠️ 미검증 → ✅ 검증)
+
+메인테이너는 증권사 계좌를 새로 개설하지 않는다. 미검증 어댑터는 **그 증권사 계좌를 가진 사용자의 실측 파일**로 검증한다.
+
+제보하는 사람 (5분):
+
+```bash
+pip install 'hermetix[stream]'
+HERMETIX_API_KEY=... HERMETIX_API_SECRET=... HERMETIX_ACCOUNT=... python -m hermetix.verify nh
+#   toss·kb 처럼 실전만 있는 증권사: --live --read-only (조회만) 또는 --live --live-orders (원거리 지정가 1주 → 즉시 취소)
+```
+
+명령은 시세→캔들→캘린더→계좌→보유→주문가능액→주문 목록→체결→(모의면) 주문 생성→조회→취소→(스트림 지원 시) 60초 프레임 채집을
+돌리고, 어댑터가 실제로 주고받은 HTTP 요청·응답과 원시 웹소켓 프레임을 `hermetix-verify-<broker>.json` 하나에 적는다.
+키·토큰·계좌번호·고객 정보는 파일에 쓰기 전에 `***` 로 가린다. 그 파일을 [실측 제보 이슈](../../../issues/new?template=broker-verification.md)에 첨부하면 끝.
+
+메인테이너:
+
+1. 파일의 `http` 응답으로 `fixtures/<broker>.json` 의 재구성값을 실측값으로 교체하고, `stream.frames` 로 `stream` 섹션을 채워 `measured: true`
+2. 네 언어 컨포먼스 실행 → 파서가 실측 응답과 다르면 어댑터를 고친다 (이게 이 절차의 목적)
+3. README 지원 표의 상태를 올린다 — 조회 단계까지 통과하면 **조회 검증**, 주문 취소까지 통과하면 **주문 검증**, 스트림 프레임까지 파싱되면 **실시간 검증**. 셋 다면 ✅ 검증
+4. hermetix-service `brokers.json` 의 `verification`·`verifiedAt` 을 같이 올려 [API 현황](https://hermetix.dev/status) 에 반영, README 검증 기여자 표에 제보자를 적는다
+
 ## 새 어댑터 추가 절차
 
 1. 모의서버 실측(토큰·시세·캔들·잔고·주문·에러 포맷)으로 `fixtures/<broker>.json` 작성

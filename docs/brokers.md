@@ -5,7 +5,7 @@
 ## 검증 상태의 의미
 
 - ✅ **검증** — 실서버 스모크 테스트(시세→캔들→계좌→주문 전 구간)를 통과한 환경. KIS·키움의 실전은 호스트·TR ID 전환만 구현돼 있고 실계좌 스모크는 아직입니다
-- ⚠️ **미검증** — 공식 SDK·문서에서 엔드포인트와 필드명을 역추적해 만든 어댑터. 네 언어 컨포먼스 시나리오는 통과했지만 픽스처가 실측이 아니라 문서 재구성값이라, 모의계좌 실측으로 확인되기 전까지는 스펙 해석 오류가 있을 수 있습니다. 실측을 도와주실 분은 [새 증권사 요청 이슈](../../../issues/new?template=broker-request.md)로 알려주세요
+- ⚠️ **미검증** — 공식 SDK·문서에서 엔드포인트와 필드명을 역추적해 만든 어댑터. 네 언어 컨포먼스 시나리오는 통과했지만 픽스처가 실측이 아니라 문서 재구성값이라, 모의계좌 실측으로 확인되기 전까지는 스펙 해석 오류가 있을 수 있습니다. 계좌가 있다면 `python -m hermetix.verify <broker>` 로 실측 파일을 만들어 [실측 제보 이슈](../../../issues/new?template=broker-verification.md)에 첨부해 주세요 ([절차](../conformance/README.md#실측-제보-절차))
 - ⚠️ **실전 전용** — 모의투자 환경이 없어 실계좌로만 검증할 수 있는 증권사(`toss`, `kb`). 반드시 `hermetix.live.enabled: true` 와 주문 금액 상한(`hermetix.risk.*`)을 함께 설정하고 소액으로 시작하세요
 - 증권사별 지원 기능은 [`BrokerCapabilities`](../kotlin/hermetix-broker/src/main/kotlin/com/tripleauth/hermetix/broker/BrokerCapabilities.kt) 로 코드에 선언되며(캔들 주기·지원 환경·시장·멱등키·실시간 채널 등), 엔진이 기동 시 전략-증권사 호환성을 검증합니다
 
@@ -120,4 +120,4 @@ hermetix:
 
 프레임 파서와 골든 픽스처는 `conformance/fixtures/*.json` 의 `stream` 섹션에 있고, `measured: false` 인 픽스처는 문서 예시에서 재구성한 값입니다.
 
-⚠️ 항목은 공식 문서·SDK·AsyncAPI 예시로 만든 파서라 필드 해석이 틀릴 수 있습니다. 해당 증권사 계좌가 있다면 각 언어의 스모크 테스트(`HERMETIX_RAW_DUMP` 로 원시 프레임 덤프)를 돌려 [새 증권사 요청 이슈](../../../issues/new?template=broker-request.md)로 프레임을 보내 주세요. 실측 프레임으로 픽스처를 교체하면 ✅ 로 올라갑니다. 프레임 샘플과 기대값은 [컨포먼스 픽스처](../conformance/README.md)의 `stream` 섹션에 있습니다.
+⚠️ 항목은 공식 문서·SDK·AsyncAPI 예시로 만든 파서라 필드 해석이 틀릴 수 있습니다. 해당 증권사 계좌가 있다면 `python -m hermetix.verify <broker>` 가 60초간 원시 프레임을 채집합니다 — 결과 파일을 [실측 제보 이슈](../../../issues/new?template=broker-verification.md)로 보내 주세요. 실측 프레임으로 픽스처를 교체하면 ✅ 로 올라갑니다. 프레임 샘플과 기대값은 [컨포먼스 픽스처](../conformance/README.md)의 `stream` 섹션에 있습니다.
