@@ -10,8 +10,9 @@
 [![npm](https://img.shields.io/npm/v/hermetix.svg)](https://www.npmjs.com/package/hermetix)
 [![PyPI](https://img.shields.io/pypi/v/hermetix.svg)](https://pypi.org/project/hermetix/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-%EC%B0%B8%EC%97%AC%ED%95%98%EA%B8%B0-5865F2?logo=discord&logoColor=white)](https://discord.gg/wRgFGA7rpG)
 
-[홈](https://hermetix.dev/) · [사용량 랭킹](https://hermetix.dev/rankings) · [API 현황](https://hermetix.dev/status) · [전략 작성 가이드](docs/strategy-guide.md) · [아키텍처](docs/architecture.md)
+[홈](https://hermetix.dev/) · [사용량 랭킹](https://hermetix.dev/rankings) · [API 현황](https://hermetix.dev/status) · [디스코드](https://discord.gg/wRgFGA7rpG) · [전략 작성 가이드](docs/strategy-guide.md) · [아키텍처](docs/architecture.md)
 
 </div>
 
