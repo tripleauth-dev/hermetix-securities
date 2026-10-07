@@ -73,7 +73,7 @@ holdings = client.get_holdings()
 repositories { mavenCentral(); maven("https://jitpack.io") }
 
 dependencies {
-    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.3")
+    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.4")
 }
 ```
 
@@ -274,6 +274,7 @@ hermetix:
 
 | 버전 | 내용 |
 |---|---|
+| 0.11.4 | 토큰 수명주기 공용화(8개 증권사) — 발급 유량 초과를 `RateLimitError` 로, 발급 실패 60초 쿨다운, 토큰 파일 캐시 `~/.hermetix/tokens`, 거부 토큰 폐기 후 1회 재발급 |
 | 0.11.3 | 실측 제보 도구 `python -m hermetix.verify`, 검증 상태 3단계 |
 | 0.11.2 | 텔레메트리 수신 엔드포인트를 `service-api-prod.hermetix.dev` 로 변경 |
 | 0.11.1 | 저장소를 `tripleauth-dev/hermetix-securities` 로 이동. Go 모듈 경로와 JitPack 좌표 변경 |
