@@ -25,6 +25,7 @@ from ..models import (
     Account, BrokerCapabilities, Candle, CandleInterval, CreateOrderRequest, StreamChannel,
     Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, OrderType, Quote, TradingEnvironment, parse_symbol,
 )
+from ..tokens import FAILURE_COOLDOWN_SECONDS, TokenManager
 from .toss_stream import TossMarketStream
 
 _STATUS = {
@@ -79,9 +80,8 @@ class TossClient(StreamingBrokerClient):
         self._account_seq = account_seq
         self._http = _Http(base_url)
         self._limiter = RateLimiter(throttle_seconds, max_retries=3, backoff=lambda attempt: float(1 << (attempt - 1)))
-        self._token: str | None = None
-        self._token_expires_at = 0.0
-        self._token_lock = threading.Lock()
+        self._tokens = TokenManager("toss", client_id, self._issue_token, 60)
+        self._account_lock = threading.Lock()
 
     # ------------------------------------------------------------------ market
 
@@ -208,7 +208,7 @@ class TossClient(StreamingBrokerClient):
     def _account(self) -> str:
         if self._account_seq:
             return self._account_seq
-        with self._token_lock:
+        with self._account_lock:
             if self._account_seq:
                 return self._account_seq
             accounts = self._call("GET", "/api/v1/accounts") or []
@@ -219,10 +219,11 @@ class TossClient(StreamingBrokerClient):
             return self._account_seq
 
     def _call(self, method: str, path: str, *, query: dict | None = None, json_body: dict | None = None, account: bool = False):
-        return self._limiter.execute(lambda: self._call_once(method, path, query, json_body, account), f"toss {path}")
+        return self._limiter.execute(
+            lambda: self._tokens.call(lambda token: self._call_once(method, path, query, json_body, account, token)), f"toss {path}")
 
-    def _call_once(self, method: str, path: str, query, json_body, account: bool):
-        headers = {"Authorization": f"Bearer {self._get_token()}"}
+    def _call_once(self, method: str, path: str, query, json_body, account: bool, token: str):
+        headers = {"Authorization": f"Bearer {token}"}
         if account:
             headers["X-Tossinvest-Account"] = self._account()
         status, parsed = self._http.request(method, path, headers=headers, query=query, json_body=json_body)
@@ -256,17 +257,26 @@ class TossClient(StreamingBrokerClient):
         return TossMarketStream(self._ws_url, self._get_token, self._account, usage=self._usage)
 
     def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 60:
-            return self._token
-        with self._token_lock:
-            if self._token and time.time() < self._token_expires_at - 60:
-                return self._token
-            with self._usage.measure("auth"):
-                self._limiter.throttle.wait()
-                status, body = self._http.request("POST", "/oauth2/token", form_body={
-                    "grant_type": "client_credentials", "client_id": self._client_id, "client_secret": self._client_secret})
-                if status != 200 or not body.get("access_token"):
-                    raise AuthError(status, body.get("error"), f"토스 토큰 발급 실패({body.get('error')}): {body.get('error_description') or ''}")
-                self._token = body["access_token"]
-                self._token_expires_at = time.time() + float(body.get("expires_in", 86400))
-                return self._token
+        return self._tokens.get()
+
+    def _issue_token(self) -> tuple[str, float]:
+        with self._usage.measure("auth"):
+            self._limiter.throttle.wait()
+            status, body = self._http.request("POST", "/oauth2/token", form_body={
+                "grant_type": "client_credentials", "client_id": self._client_id, "client_secret": self._client_secret})
+            if status != 200 or not body.get("access_token"):
+                error = body.get("error")
+                code = error.get("code") if isinstance(error, dict) else error
+                msg = f"토스 토큰 발급 실패({code}): {body.get('error_description') or (error.get('message') if isinstance(error, dict) else '') or ''}"
+                if status == 429:
+                    retry_after = (getattr(self._http, "last_headers", None) or {}).get("retry-after")
+                    raise RateLimitError(status, code, msg, _float_or_none(retry_after) or FAILURE_COOLDOWN_SECONDS)
+                raise AuthError(status, code, msg)
+            return body["access_token"], time.time() + float(body.get("expires_in", 86400))
+
+
+def _float_or_none(value) -> float | None:
+    try:
+        return float(value) if value else None
+    except ValueError:
+        return None

@@ -18,6 +18,7 @@ import type {
   Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, OrderType, Quote, TradingEnvironment,
 } from "../models.js";
 import { parseSymbol, symbolCodeFor } from "../models.js";
+import { FAILURE_COOLDOWN_SECONDS, TokenManager } from "../tokens.js";
 import { TossMarketStream } from "./tossStream.js";
 
 const STATUS: Record<string, OrderStatus> = {
@@ -42,8 +43,7 @@ export class TossClient implements StreamingBrokerClient {
     streams: new Set(["TRADES", "ORDER_BOOK", "ORDER_EVENTS"]), // AsyncAPI 1.2.2 기반, 실측 전
   };
 
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+  private readonly tokens: TokenManager;
   private accountSeq: string;
   private readonly limiter: RateLimiter;
 
@@ -59,7 +59,8 @@ export class TossClient implements StreamingBrokerClient {
   ) {
     this.accountSeq = accountSeq;
     this.limiter = new RateLimiter(throttleMs, 3, (attempt) => 1000 * 2 ** (attempt - 1));
-      this.usage = instrumentBroker(this);
+    this.tokens = new TokenManager("toss", clientId, () => this.issueToken(), 60);
+    this.usage = instrumentBroker(this);
   }
 
   /** 웹소켓은 REST 와 같은 토큰을 핸드셰이크 헤더에 싣고, 주문 이벤트 구독은 accountSeq 로 계좌를 고른다 */
@@ -183,11 +184,11 @@ export class TossClient implements StreamingBrokerClient {
   }
 
   private call(method: string, path: string, body?: Record<string, unknown>, account = false): Promise<unknown> {
-    return this.limiter.execute(() => this.callOnce(method, path, body, account), `toss ${path}`);
+    return this.limiter.execute(() => this.tokens.call((token) => this.callOnce(method, path, token, body, account)), `toss ${path}`);
   }
 
-  private async callOnce(method: string, path: string, body?: Record<string, unknown>, account = false): Promise<unknown> {
-    const headers: Record<string, string> = { Authorization: `Bearer ${await this.getToken()}` };
+  private async callOnce(method: string, path: string, token: string, body?: Record<string, unknown>, account = false): Promise<unknown> {
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
     if (account) headers["X-Tossinvest-Account"] = await this.account();
     if (body) headers["Content-Type"] = "application/json";
     const [status, parsed, resHeaders] = await httpJson(this.baseUrl + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
@@ -207,16 +208,28 @@ export class TossClient implements StreamingBrokerClient {
     return parsed.result;
   }
 
-  private async getToken(): Promise<string> {
+  private getToken(): Promise<string> {
+    return this.tokens.get();
+  }
+
+  private issueToken(): Promise<{ token: string; expiresAt: number }> {
     return this.usage.measure("auth", async () => {
-    if (this.token && Date.now() < this.tokenExpiresAt - 60_000) return this.token;
-    await this.limiter.throttle.wait();
-    const form = new URLSearchParams({ grant_type: "client_credentials", client_id: this.clientId, client_secret: this.clientSecret });
-    const [status, body] = await httpJson(`${this.baseUrl}/oauth2/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
-    if (status !== 200 || typeof body.access_token !== "string") throw new AuthError(status, (body.error as string) ?? null, `토스 토큰 발급 실패(${body.error}): ${body.error_description ?? ""}`);
-    this.token = body.access_token;
-    this.tokenExpiresAt = Date.now() + Number(body.expires_in ?? 86400) * 1000;
-    return this.token;
+      await this.limiter.throttle.wait();
+      const form = new URLSearchParams({ grant_type: "client_credentials", client_id: this.clientId, client_secret: this.clientSecret });
+      const [status, body, resHeaders] = await httpJson(`${this.baseUrl}/oauth2/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+      if (status !== 200 || typeof body.access_token !== "string") {
+        // OAuth 표준 {"error": "invalid_client", ...} 또는 플랫폼 엔벨로프 {"error": {"code", "message"}}
+        const error = body.error;
+        const envelope = typeof error === "object" && error !== null ? error as Record<string, unknown> : null;
+        const code = envelope ? (envelope.code as string | undefined) ?? null : (error as string | undefined) ?? null;
+        const msg = `토스 토큰 발급 실패(${code}): ${body.error_description || (envelope ? envelope.message : "") || ""}`;
+        if (status === 429) {
+          const retryAfter = Number(resHeaders?.["retry-after"]);
+          throw new RateLimitError(status, code, msg, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : FAILURE_COOLDOWN_SECONDS);
+        }
+        throw new AuthError(status, code, msg);
+      }
+      return { token: body.access_token, expiresAt: Date.now() + Number(body.expires_in ?? 86400) * 1000 };
     });
   }
 }

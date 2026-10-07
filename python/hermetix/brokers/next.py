@@ -14,7 +14,6 @@ v1.3 응답(quotes outcome, 캔들 time, 계좌 cashAmount, 보유 averageBuyPri
 from __future__ import annotations
 
 import re
-import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -31,6 +30,7 @@ from ..models import (
     Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, OrderType, Quote,
     SessionHours, TradingEnvironment,
 )
+from ..tokens import FAILURE_COOLDOWN_SECONDS, TokenManager
 
 ACCOUNT_HEADER = "X-Next-Account-Id"
 REQUEST_ID_HEADER = "X-Request-Id"
@@ -112,9 +112,7 @@ class NextClient(BrokerClient):
         self._http = _Http(base_url)
         # 429 는 Retry-After 만큼 기다렸다가 최대 2회 재시도. 쓰로틀은 없다 (초당 한도가 넉넉함)
         self._limiter = RateLimiter(0, max_retries=2, backoff=lambda attempt: 1.0 * attempt)
-        self._token: str | None = None
-        self._token_expires_at = 0.0
-        self._token_lock = threading.Lock()
+        self._tokens = TokenManager("next", client_id, self._issue_token, 60)
 
     # ------------------------------------------------------------------ market
 
@@ -273,9 +271,9 @@ class NextClient(BrokerClient):
 
     def _request(self, method: str, path: str, *, query: dict | None = None,
                  json_body: dict | None = None, account: bool = False) -> dict:
-        def call() -> dict:
+        def call(token: str) -> dict:
             headers = {
-                "Authorization": f"Bearer {self._get_token()}",
+                "Authorization": f"Bearer {token}",
                 REQUEST_ID_HEADER: new_request_id(),
             }
             if account and self._account_id:
@@ -286,15 +284,8 @@ class NextClient(BrokerClient):
                 raise self._map_error(status, body.get("error") or {}, _float_or_none(retry_after))
             return body
 
-        def with_auth_retry() -> dict:
-            try:
-                return call()
-            except AuthError:
-                # 토큰 만료 - 1회 재발급 후 재시도
-                self._token = None
-                return call()
-
-        return self._limiter.execute(with_auth_retry, "next")
+        # 토큰 거부(만료) 시 1회 재발급 후 재시도는 TokenManager.call
+        return self._limiter.execute(lambda: self._tokens.call(call), "next")
 
     @staticmethod
     def _map_error(status: int, error: dict, retry_after_seconds: float | None = None) -> BrokerApiError:
@@ -321,30 +312,30 @@ class NextClient(BrokerClient):
         return BrokerApiError(status, code, message)
 
     def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 60:
-            return self._token
-        with self._token_lock:
-            if self._token and time.time() < self._token_expires_at - 60:
-                return self._token
-            with self._usage.measure("auth"):
-                status, body = self._http.request(
-                    "POST", "/v1/oauth/token",
-                    headers={REQUEST_ID_HEADER: new_request_id()},
-                    form_body={"grant_type": "client_credentials",
-                               "client_id": self._client_id, "client_secret": self._client_secret},
-                )
-                if status != 200 or "access_token" not in body:
-                    raise self._token_error(status, body)
-                self._token = body["access_token"]
-                self._token_expires_at = time.time() + float(body.get("expires_in", 43200))
-                return self._token
+        return self._tokens.get()
+
+    def _issue_token(self) -> tuple[str, float]:
+        with self._usage.measure("auth"):
+            status, body = self._http.request(
+                "POST", "/v1/oauth/token",
+                headers={REQUEST_ID_HEADER: new_request_id()},
+                form_body={"grant_type": "client_credentials",
+                           "client_id": self._client_id, "client_secret": self._client_secret},
+            )
+            if status != 200 or "access_token" not in body:
+                retry_after = (getattr(self._http, "last_headers", None) or {}).get("retry-after")
+                raise self._token_error(status, body, _float_or_none(retry_after))
+            return body["access_token"], time.time() + float(body.get("expires_in", 43200))
 
     @staticmethod
-    def _token_error(status: int, body: dict) -> AuthError:
+    def _token_error(status: int, body: dict, retry_after_seconds: float | None = None) -> BrokerApiError:
         error = body.get("error")
         # 토큰 발급 400/401 은 OAuth 표준 형식: {"error": "invalid_client", "error_description": "..."}
         if isinstance(error, str):
             return AuthError(status, error, f"Next 토큰 발급 실패({error}): {body.get('error_description') or ''}")
         # 429/5xx 는 플랫폼 엔벨로프: {"error": {"code": .., "message": ..}}
         error = error or {}
-        return AuthError(status, error.get("code"), f"Next 토큰 발급 실패({error.get('code')}): {error.get('message') or ''}")
+        message = f"Next 토큰 발급 실패({error.get('code')}): {error.get('message') or ''}"
+        if status == 429:
+            return RateLimitError(status, error.get("code"), message, retry_after_seconds or FAILURE_COOLDOWN_SECONDS)
+        return AuthError(status, error.get("code"), message)

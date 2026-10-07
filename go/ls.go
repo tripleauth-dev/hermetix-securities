@@ -18,7 +18,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -42,9 +41,7 @@ type LsClient struct {
 	http              *http.Client
 	limiter           *rateLimiter
 	chartLimiter      *rateLimiter
-	tokenMu           sync.Mutex
-	token             string
-	tokenExpires      time.Time
+	tokens            *tokenManager
 	call              func(path, trCd, inBlock string, body map[string]any) (map[string]any, error)
 }
 
@@ -56,6 +53,7 @@ func NewLsClient(appKey, appSecret string) *LsClient {
 		limiter:      newRateLimiter(500*time.Millisecond, 3, func(a int) time.Duration { return time.Duration(a) * time.Second }),
 		chartLimiter: newRateLimiter(1100*time.Millisecond, 0, func(int) time.Duration { return 0 }),
 	}
+	c.tokens = newTokenManager("ls", appKey, 10*time.Minute, c.issueToken)
 	c.call = c.request
 	return c
 }
@@ -440,14 +438,12 @@ func (c *LsClient) toOrder(row map[string]any) Order {
 }
 
 func (c *LsClient) request(path, trCd, inBlock string, body map[string]any) (map[string]any, error) {
-	return c.limiter.execute("LS "+trCd, func() (map[string]any, error) { return c.requestOnce(path, trCd, inBlock, body) })
+	return c.limiter.execute("LS "+trCd, func() (map[string]any, error) {
+		return c.tokens.call(func(token string) (map[string]any, error) { return c.requestOnce(path, trCd, inBlock, body, token) })
+	})
 }
 
-func (c *LsClient) requestOnce(path, trCd, inBlock string, body map[string]any) (map[string]any, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
+func (c *LsClient) requestOnce(path, trCd, inBlock string, body map[string]any, token string) (map[string]any, error) {
 	headers := map[string]string{
 		"Content-Type": "application/json; charset=utf-8", "authorization": "Bearer " + token, "tr_cd": trCd, "tr_cont": "N", "tr_cont_key": "",
 	}
@@ -491,19 +487,16 @@ func (c *LsClient) requestOnce(path, trCd, inBlock string, body map[string]any) 
 	return parsed, nil
 }
 
-func (c *LsClient) getToken() (_ string, err error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token != "" && time.Now().Before(c.tokenExpires.Add(-10*time.Minute)) {
-		return c.token, nil
-	}
+func (c *LsClient) getToken() (string, error) { return c.tokens.get() }
+
+func (c *LsClient) issueToken() (_ string, _ time.Time, err error) {
 	defer c.usage().Measure("auth")(&err) // 실제 발급 경로만 센다 (캐시 히트는 제외)
 	c.limiter.throttle.wait()
 	form := url.Values{"grant_type": {"client_credentials"}, "appkey": {c.appKey}, "appsecretkey": {c.appSecret}, "scope": {"oob"}}
 	status, body, err := httpJSON(c.http, "POST", c.baseURL+"/oauth2/token",
 		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, []byte(form.Encode()))
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	token := str(body["access_token"])
 	if status != 200 || token == "" {
@@ -511,14 +504,14 @@ func (c *LsClient) getToken() (_ string, err error) {
 		if code == "" {
 			code = str(body["rsp_cd"])
 		}
-		return "", newAuthError(status, code, fmt.Sprintf("LS 토큰 발급 실패(%s): %s", code, str(body["error_description"])+str(body["rsp_msg"])))
+		detail := str(body["error_description"]) + str(body["rsp_msg"])
+		if code == "IGW00201" || status == 429 {
+			return "", time.Time{}, newRateLimitErrorWithRetryAfter(status, code,
+				fmt.Sprintf("LS 토큰 발급 유량 초과(%s): %s", code, detail), TokenFailureCooldown.Seconds())
+		}
+		return "", time.Time{}, newAuthError(status, code, fmt.Sprintf("LS 토큰 발급 실패(%s): %s", code, detail))
 	}
-	c.token = token
-	c.tokenExpires = time.Now().Add(time.Duration(nhVal(body["expires_in"]).IntPart()) * time.Second)
-	if c.tokenExpires.Before(time.Now().Add(time.Minute)) {
-		c.tokenExpires = time.Now().Add(24 * time.Hour)
-	}
-	return c.token, nil
+	return token, tokenExpiresIn(body["expires_in"], 24*time.Hour), nil
 }
 
 func containsAny(text string, keywords ...string) bool {

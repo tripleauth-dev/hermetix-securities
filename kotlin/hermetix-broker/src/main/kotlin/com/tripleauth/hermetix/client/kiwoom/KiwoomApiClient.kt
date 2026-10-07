@@ -17,6 +17,7 @@ import com.tripleauth.hermetix.broker.KrxTick
 import com.tripleauth.hermetix.broker.TradingEnvironment
 import com.tripleauth.hermetix.broker.UsageTelemetry
 import com.tripleauth.hermetix.broker.symbolCode
+import com.tripleauth.hermetix.client.BrokerTokenManager
 import com.tripleauth.hermetix.client.dto.AccountResponse
 import com.tripleauth.hermetix.client.dto.BuyingPowerResponse
 import com.tripleauth.hermetix.client.dto.CalendarResponse
@@ -40,6 +41,7 @@ import org.springframework.http.MediaType
 import org.springframework.web.client.RestClient
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -61,10 +63,14 @@ import java.time.format.DateTimeFormatter
  * - 캘린더는 KRX 정규장을 합성한다 (공휴일 미반영 — 주문은 서버가 거부)
  * - clientOrderId 미지원 (무시된다)
  */
-class KiwoomApiClient(
+class KiwoomApiClient internal constructor(
     private val properties: KiwoomApiProperties,
     private val objectMapper: ObjectMapper,
+    clock: Clock,
+    sleeper: (Long) -> Unit,
 ) : StreamingBrokerClient {
+
+    constructor(properties: KiwoomApiProperties, objectMapper: ObjectMapper) : this(properties, objectMapper, Clock.systemUTC(), Thread::sleep)
 
     private val logger = KotlinLogging.logger { }
 
@@ -90,15 +96,16 @@ class KiwoomApiClient(
         .baseUrl(properties.resolvedBaseUrl())
         .build()
 
-    @Volatile
-    private var cachedToken: Pair<String, Instant>? = null
-
     /** TR 당 초당 1회 유량 제한 — 쓰로틀 + 백오프 재시도 */
     private val limiter = RateLimiter(
         minIntervalMillis = properties.throttleMillis,
         maxRetries = 3,
         backoffMillis = { attempt -> 1100L * attempt },
+        sleeper = sleeper,
     )
+
+    /** 토큰 수명주기 — 메모리 → 파일 캐시 → 발급, 발급 실패 60초 쿨다운, 거부 토큰 폐기 후 1회 재시도 */
+    private val tokens = BrokerTokenManager("kiwoom", properties.appkey, properties.tokenRefreshMarginSeconds, clock) { issueToken(clock) }
 
     // ------------------------------------------------------------------ market
 
@@ -322,14 +329,14 @@ class KiwoomApiClient(
     }
 
     private fun call(path: String, apiId: String, body: Map<String, String>): JsonNode =
-        limiter.execute("키움 $apiId") { callOnce(path, apiId, body) }
+        limiter.execute("키움 $apiId") { tokens.call { token -> callOnce(path, apiId, body, token) } }
 
-    private fun callOnce(path: String, apiId: String, body: Map<String, String>): JsonNode {
+    private fun callOnce(path: String, apiId: String, body: Map<String, String>, token: String): JsonNode {
         return restClient.post()
             .uri(path)
             .contentType(MediaType.APPLICATION_JSON)
             .headers { headers ->
-                headers.set("authorization", "Bearer ${token()}")
+                headers.set("authorization", "Bearer $token")
                 headers.set("api-id", apiId)
             }
             .body(objectMapper.writeValueAsString(body))
@@ -343,7 +350,8 @@ class KiwoomApiClient(
                     throw when {
                         msg.contains("요청 개수를 초과") -> RateLimitError(res.statusCode.value(), code, msg)
                         msg.contains("장종료") || msg.contains("RC4058") -> MarketClosedError(res.statusCode.value(), code, msg)
-                        res.statusCode.value() == 401 -> AuthError(res.statusCode.value(), code, msg)
+                        // 8005: Token이 유효하지 않습니다
+                        res.statusCode.value() == 401 || msg.contains("8005") -> AuthError(res.statusCode.value(), code, msg)
                         else -> BrokerApiException(res.statusCode.value(), code, msg)
                     }
                 }
@@ -356,21 +364,9 @@ class KiwoomApiClient(
     /** 웹소켓 로그인은 REST 접근토큰을 그대로 쓴다 — 만료 시 재접속 때 [token] 이 갱신한다 */
     override fun openStream(): MarketStream = KiwoomMarketStream(properties, objectMapper, ::token, usage)
 
-    private fun token(): String {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) {
-            return cached.first
-        }
-        return refreshToken()
-    }
+    private fun token(): String = tokens.get()
 
-    @Synchronized
-    private fun refreshToken(): String = usage.measure("auth") {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) {
-            return cached.first
-        }
-
+    private fun issueToken(clock: Clock): Pair<String, Instant> = usage.measure("auth") {
         limiter.throttle()
         val node = restClient.post()
             .uri("/oauth2/token")
@@ -381,22 +377,26 @@ class KiwoomApiClient(
                 ),
             )
             .exchange { _, res ->
-                val n = objectMapper.readTree(res.body.readAllBytes())
+                val n = runCatching { objectMapper.readTree(res.body.readAllBytes()) }.getOrNull() ?: objectMapper.createObjectNode()
                 if (!res.statusCode.is2xxSuccessful || n.path("return_code").asInt(-1) != 0 || !n.hasNonNull("token")) {
-                    throw AuthError(res.statusCode.value(), n.path("return_code").asText(null), "키움 토큰 발급 실패: ${n.path("return_msg").asText("")}")
+                    val status = res.statusCode.value()
+                    val code = n.path("return_code").asText(null)
+                    val msg = "키움 토큰 발급 실패: ${n.path("return_msg").asText("")}"
+                    throw if (status == 429 || msg.contains("요청 개수를 초과")) {
+                        RateLimitError(status, code, msg, BrokerTokenManager.FAILURE_COOLDOWN_SECONDS)
+                    } else {
+                        AuthError(status, code, msg)
+                    }
                 }
                 n
-            }!!
+            }
 
-        val token = node.path("token").asText()
         // expires_dt: yyyyMMddHHmmss (KST)
         val expiresAt = runCatching {
             LocalDateTime.parse(node.path("expires_dt").asText(), DATETIME).atZone(KrxCalendar.KST).toInstant()
-        }.getOrDefault(Instant.now().plusSeconds(86400))
-
-        cachedToken = token to expiresAt
-        logger.info { "키움 token refreshed / expiresAt=$expiresAt" }
-        return token
+        }.getOrDefault(clock.instant().plusSeconds(86400))
+        logger.info { "키움 token issued / expiresAt=$expiresAt" }
+        node.path("token").asText() to expiresAt
     }
 
     /** 등락 부호가 붙는 필드 ("-239500", "+1200") — 부호 유지 파싱 */

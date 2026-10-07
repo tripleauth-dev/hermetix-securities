@@ -10,6 +10,6 @@ import (
 
 func TestMain(m *testing.M) {
 	TelemetryTransport = func([]byte) error { return nil }
-	dbTokenCacheDir = "" // DB 토큰 파일 캐시도 끈다 — 가짜 키로 받은 토큰이 ~/.hermetix/tokens 에 남거나 테스트끼리 공유되지 않도록
+	tokenCacheDir = "" // 토큰 파일 캐시도 끈다 — 가짜 키로 받은 토큰이 ~/.hermetix/tokens 에 남거나 테스트끼리 공유되지 않도록
 	os.Exit(m.Run())
 }

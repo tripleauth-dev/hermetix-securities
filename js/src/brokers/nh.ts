@@ -21,6 +21,7 @@ import type {
   Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, Quote, TradingEnvironment,
 } from "../models.js";
 import { symbolCodeFor } from "../models.js";
+import { FAILURE_COOLDOWN_SECONDS, TokenManager } from "../tokens.js";
 import { NhMarketStream } from "./nhStream.js";
 
 const SUCCESS_CODES = new Set(["00000", "00166", "00221", "13578", "00165", "00218"]);
@@ -73,8 +74,7 @@ export class NhClient implements StreamingBrokerClient {
 
   readonly baseUrl: string;
   readonly wsUrl: string;
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+  private readonly tokens: TokenManager;
   private accountNo: string;
   private readonly limiter: RateLimiter;
 
@@ -95,7 +95,8 @@ export class NhClient implements StreamingBrokerClient {
     this.baseUrl = baseUrl || (environment === "LIVE" ? NhClient.LIVE_URL : NhClient.PAPER_URL);
     this.wsUrl = wsUrl || (environment === "LIVE" ? NhClient.LIVE_WS_URL : NhClient.PAPER_WS_URL);
     this.limiter = new RateLimiter(throttleMs, 3, (attempt) => 1000 * attempt);
-      this.usage = instrumentBroker(this);
+    this.tokens = new TokenManager("nh", appKey, () => this.issueToken(), 300);
+    this.usage = instrumentBroker(this);
   }
 
   // ---------------------------------------------------------------- market
@@ -270,15 +271,15 @@ export class NhClient implements StreamingBrokerClient {
   }
 
   private call(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.limiter.execute(() => this.callOnce(path, body), `NH ${path}`);
+    return this.limiter.execute(() => this.tokens.call((token) => this.callOnce(path, body, token)), `NH ${path}`);
   }
 
-  private async callOnce(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async callOnce(path: string, body: Record<string, unknown>, token: string): Promise<Record<string, unknown>> {
     const [status, parsed, resHeaders] = await httpJson(this.baseUrl + path, {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=UTF-8",
-        authorization: `Bearer ${await this.getToken()}`, "x-client-id": this.appKey, "x-client-secret": this.appSecret,
+        authorization: `Bearer ${token}`, "x-client-id": this.appKey, "x-client-secret": this.appSecret,
       },
       body: JSON.stringify({ Input_0: body }),
     });
@@ -300,22 +301,25 @@ export class NhClient implements StreamingBrokerClient {
     return parsed;
   }
 
-  private async getToken(): Promise<string> {
+  private getToken(): Promise<string> {
+    return this.tokens.get();
+  }
+
+  private issueToken(): Promise<{ token: string; expiresAt: number }> {
     return this.usage.measure("auth", async () => {
-    if (this.token && Date.now() < this.tokenExpiresAt - 300_000) return this.token;
-    await this.limiter.throttle.wait();
-    // SDK 규약: 파라미터는 쿼리스트링, 본문 없음, content-type 은 form-urlencoded
-    const query = new URLSearchParams({ appkey: this.appKey, appsecretkey: this.appSecret, grant_type: "client_credentials", scope: "oob" });
-    const [status, body] = await httpJson(`${this.authUrl}/oauth2/token?${query}`, {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    });
-    if (status !== 200 || typeof body.access_token !== "string") {
-      const code = String(body.code ?? body.rsp_cd ?? "");
-      throw new AuthError(status, code || null, `NH 토큰 발급 실패(${code}): ${body.message ?? body.rsp_msg ?? ""}`);
-    }
-    this.token = body.access_token;
-    this.tokenExpiresAt = Date.now() + Number(body.expires_in ?? 86400) * 1000;
-    return this.token;
+      await this.limiter.throttle.wait();
+      // SDK 규약: 파라미터는 쿼리스트링, 본문 없음, content-type 은 form-urlencoded
+      const query = new URLSearchParams({ appkey: this.appKey, appsecretkey: this.appSecret, grant_type: "client_credentials", scope: "oob" });
+      const [status, body] = await httpJson(`${this.authUrl}/oauth2/token?${query}`, {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      });
+      if (status !== 200 || typeof body.access_token !== "string") {
+        const code = String(body.code ?? body.rsp_cd ?? "");
+        const msg = `NH 토큰 발급 실패(${code}): ${body.message ?? body.rsp_msg ?? ""}`;
+        if (status === 429 || code.startsWith("IGW429")) throw new RateLimitError(status, code || null, msg, FAILURE_COOLDOWN_SECONDS);
+        throw new AuthError(status, code || null, msg);
+      }
+      return { token: body.access_token, expiresAt: Date.now() + Number(body.expires_in ?? 86400) * 1000 };
     });
   }
 }

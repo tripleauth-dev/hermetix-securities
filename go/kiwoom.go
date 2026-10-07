@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -26,9 +25,7 @@ type KiwoomClient struct {
 	environment       TradingEnvironment
 	http              *http.Client
 	limiter           *rateLimiter
-	tokenMu           sync.Mutex
-	token             string
-	tokenExpires      time.Time
+	tokens            *tokenManager
 	call              func(path, apiID string, jsonBody map[string]string) (map[string]any, error)
 }
 
@@ -46,6 +43,7 @@ func NewKiwoomClient(appkey, secretkey string) *KiwoomClient {
 		http:        &http.Client{Timeout: 30 * time.Second},
 		limiter:     newRateLimiter(1100*time.Millisecond, 3, func(attempt int) time.Duration { return time.Duration(attempt) * 1100 * time.Millisecond }),
 	}
+	c.tokens = newTokenManager("kiwoom", appkey, 5*time.Minute, c.issueToken)
 	c.call = c.request
 	return c
 }
@@ -429,15 +427,11 @@ func (c *KiwoomClient) balance() (map[string]any, error) {
 
 func (c *KiwoomClient) request(path, apiID string, jsonBody map[string]string) (map[string]any, error) {
 	return c.limiter.execute("키움 "+apiID, func() (map[string]any, error) {
-		return c.requestOnce(path, apiID, jsonBody)
+		return c.tokens.call(func(token string) (map[string]any, error) { return c.requestOnce(path, apiID, jsonBody, token) })
 	})
 }
 
-func (c *KiwoomClient) requestOnce(path, apiID string, jsonBody map[string]string) (map[string]any, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
+func (c *KiwoomClient) requestOnce(path, apiID string, jsonBody map[string]string, token string) (map[string]any, error) {
 	payload, _ := json.Marshal(jsonBody)
 	status, body, err := httpJSON(c.http, "POST", c.baseURL+path, map[string]string{
 		"Content-Type":  "application/json;charset=UTF-8",
@@ -459,7 +453,7 @@ func (c *KiwoomClient) requestOnce(path, apiID string, jsonBody map[string]strin
 			return nil, newRateLimitError(status, code, msg)
 		case strings.Contains(msg, "장종료") || strings.Contains(msg, "RC4058"):
 			return nil, newMarketClosedError(status, code, msg)
-		case status == 401:
+		case status == 401 || strings.Contains(msg, "8005"): // 8005: Token이 유효하지 않습니다
 			return nil, newAuthError(status, code, msg)
 		default:
 			return nil, &BrokerAPIError{status, code, msg}
@@ -468,12 +462,9 @@ func (c *KiwoomClient) requestOnce(path, apiID string, jsonBody map[string]strin
 	return body, nil
 }
 
-func (c *KiwoomClient) getToken() (_ string, err error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token != "" && time.Now().Before(c.tokenExpires.Add(-5*time.Minute)) {
-		return c.token, nil
-	}
+func (c *KiwoomClient) getToken() (string, error) { return c.tokens.get() }
+
+func (c *KiwoomClient) issueToken() (_ string, _ time.Time, err error) {
 	defer c.usage().Measure("auth")(&err) // 실제 발급 경로만 센다 (캐시 히트는 제외)
 	c.limiter.throttle.wait()
 	payload, _ := json.Marshal(map[string]string{
@@ -482,7 +473,7 @@ func (c *KiwoomClient) getToken() (_ string, err error) {
 	status, body, err := httpJSON(c.http, "POST", c.baseURL+"/oauth2/token",
 		map[string]string{"Content-Type": "application/json;charset=UTF-8"}, payload)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	returnCode := int64(-1)
 	if code := dOrNil(body["return_code"]); code != nil {
@@ -490,14 +481,15 @@ func (c *KiwoomClient) getToken() (_ string, err error) {
 	}
 	token := str(body["token"])
 	if status != 200 || returnCode != 0 || token == "" {
-		return "", newAuthError(status, str(body["return_code"]), "키움 토큰 발급 실패: "+str(body["return_msg"]))
+		code, msg := str(body["return_code"]), "키움 토큰 발급 실패: "+str(body["return_msg"])
+		if status == 429 || strings.Contains(msg, "요청 개수를 초과") {
+			return "", time.Time{}, newRateLimitErrorWithRetryAfter(status, code, msg, TokenFailureCooldown.Seconds())
+		}
+		return "", time.Time{}, newAuthError(status, code, msg)
 	}
-	c.token = token
 	// expires_dt: yyyyMMddHHmmss (KST)
 	if expires, err := time.ParseInLocation("20060102150405", str(body["expires_dt"]), kst); err == nil {
-		c.tokenExpires = expires
-	} else {
-		c.tokenExpires = time.Now().Add(24 * time.Hour)
+		return token, expires, nil
 	}
-	return c.token, nil
+	return token, tokenNow().Add(24 * time.Hour), nil
 }

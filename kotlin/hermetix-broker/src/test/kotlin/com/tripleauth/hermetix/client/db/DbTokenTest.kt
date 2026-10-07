@@ -4,12 +4,14 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.kotlinModule
 import com.tripleauth.hermetix.broker.AuthError
 import com.tripleauth.hermetix.broker.RateLimitError
+import com.tripleauth.hermetix.client.TokenCache
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.assertj.core.api.Assertions.within
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -34,7 +36,7 @@ class DbTokenTest {
     @AfterEach
     fun tearDown() {
         servers.forEach { it.server.shutdown() }
-        DbTokenCache.directory = null
+        TokenCache.directory = null
     }
 
     @Test
@@ -76,7 +78,7 @@ class DbTokenTest {
 
     @Test
     fun `발급 토큰은 파일 캐시로 같은 키의 다른 클라이언트와 나눠 쓴다`(@TempDir dir: Path) {
-        DbTokenCache.directory = dir
+        TokenCache.directory = dir
         client(serve(issued("tok-shared"))).getAccount()
 
         val files = Files.list(dir).use { it.toList() }
@@ -86,7 +88,8 @@ class DbTokenTest {
         val saved = objectMapper.readTree(files[0].toFile())
         assertThat(saved.fieldNames().asSequence().toList()).containsExactlyInAnyOrder("access_token", "expires_at") // 키·시크릿은 담지 않는다
         assertThat(saved.path("access_token").asText()).isEqualTo("tok-shared")
-        assertThat(saved.path("expires_at").asDouble()).isEqualTo((clock.instant().epochSecond + 86400).toDouble())
+        // 쓰로틀 대기(1ms)가 시계를 돌릴 수 있어 밀리초 단위 오차는 허용한다
+        assertThat(saved.path("expires_at").asDouble()).isCloseTo((clock.instant().epochSecond + 86400).toDouble(), within(1.0))
 
         val second = serve(issued("tok-other"))
         client(second).getAccount()
@@ -100,7 +103,7 @@ class DbTokenTest {
 
     @Test
     fun `만료가 가까운 캐시 토큰은 쓰지 않는다`(@TempDir dir: Path) {
-        DbTokenCache.directory = dir
+        TokenCache.directory = dir
         client(serve(issued("tok-old"))).getAccount()
         clock.advanceSeconds(86400 - 300)
 

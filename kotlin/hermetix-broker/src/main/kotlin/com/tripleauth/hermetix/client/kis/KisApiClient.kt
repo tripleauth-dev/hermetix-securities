@@ -19,6 +19,7 @@ import com.tripleauth.hermetix.broker.KrxTick
 import com.tripleauth.hermetix.broker.TradingEnvironment
 import com.tripleauth.hermetix.broker.UsageTelemetry
 import com.tripleauth.hermetix.broker.symbolCode
+import com.tripleauth.hermetix.client.BrokerTokenManager
 import com.tripleauth.hermetix.client.dto.AccountResponse
 import com.tripleauth.hermetix.client.dto.BuyingPowerResponse
 import com.tripleauth.hermetix.client.dto.CalendarResponse
@@ -43,6 +44,7 @@ import org.springframework.http.MediaType
 import org.springframework.web.client.RestClient
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -68,10 +70,14 @@ import java.time.format.DateTimeFormatter
  *   체결 판정은 보유 수량 변화로 근사한다. 앱 재시작 시 추적이 끊긴다 (재시작 후 잔여 미체결 주의)
  * - 주문 취소는 지점번호 없이 ODNO 만으로 동작한다 (실측 검증)
  */
-class KisApiClient(
+class KisApiClient internal constructor(
     private val properties: KisApiProperties,
     private val objectMapper: ObjectMapper,
+    clock: Clock,
+    sleeper: (Long) -> Unit,
 ) : StreamingBrokerClient {
+
+    constructor(properties: KisApiProperties, objectMapper: ObjectMapper) : this(properties, objectMapper, Clock.systemUTC(), Thread::sleep)
 
     private val logger = KotlinLogging.logger { }
 
@@ -101,15 +107,16 @@ class KisApiClient(
         .baseUrl(properties.resolvedBaseUrl())
         .build()
 
-    @Volatile
-    private var cachedToken: Pair<String, Instant>? = null
-
     /** 초당 요청 제한 — 쓰로틀 + EGW00201 백오프 재시도 */
     private val limiter = RateLimiter(
         minIntervalMillis = properties.resolvedThrottleMillis(),
         maxRetries = 3,
         backoffMillis = { attempt -> 1000L * attempt },
+        sleeper = sleeper,
     )
+
+    /** 토큰 수명주기 — 메모리 → 파일 캐시 → 발급, 발급 실패 60초 쿨다운, 거부 토큰 폐기 후 1회 재시도 */
+    private val tokens = BrokerTokenManager("kis", properties.appkey, properties.tokenRefreshMarginSeconds, clock) { issueToken(clock) }
 
     // ------------------------------------------------------------------ market
 
@@ -367,12 +374,13 @@ class KisApiClient(
         trId: String,
         query: Map<String, String> = emptyMap(),
         body: Map<String, String>? = null,
-    ): JsonNode = limiter.execute("KIS $trId") { callOnce(method, path, trId, query, body) }
+    ): JsonNode = limiter.execute("KIS $trId") { tokens.call { token -> callOnce(method, path, trId, token, query, body) } }
 
     private fun callOnce(
         method: HttpMethod,
         path: String,
         trId: String,
+        token: String,
         query: Map<String, String> = emptyMap(),
         body: Map<String, String>? = null,
     ): JsonNode {
@@ -381,7 +389,7 @@ class KisApiClient(
                 builder.path(path).apply { query.forEach { (k, v) -> queryParam(k, v) } }.build()
             }
             .headers { headers ->
-                headers.set("authorization", "Bearer ${token()}")
+                headers.set("authorization", "Bearer $token")
                 headers.set("appkey", properties.appkey)
                 headers.set("appsecret", properties.appsecret)
                 headers.set("tr_id", trId)
@@ -403,7 +411,7 @@ class KisApiClient(
                     throw when {
                         code == "EGW00201" -> RateLimitError(res.statusCode.value(), code, msg)
                         msg.contains("장종료") || msg.contains("장운영일이 아닙") -> MarketClosedError(res.statusCode.value(), code, msg)
-                        res.statusCode.value() == 401 || code == "EGW00123" -> AuthError(res.statusCode.value(), code, msg)
+                        res.statusCode.value() == 401 || code in TOKEN_REJECTED_CODES -> AuthError(res.statusCode.value(), code, msg)
                         else -> BrokerApiException(res.statusCode.value(), code, msg)
                     }
                 }
@@ -468,21 +476,8 @@ class KisApiClient(
         return node.path("approval_key").asText()
     }
 
-    private fun token(): String {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) {
-            return cached.first
-        }
-        return refreshToken()
-    }
-
-    @Synchronized
-    private fun refreshToken(): String = usage.measure("auth") {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) {
-            return cached.first
-        }
-
+    /** 토큰 발급 (`POST /oauth2/tokenP`) — 1분당 1회 제한, 초과 시 403 + `EGW00133` → [RateLimitError] */
+    private fun issueToken(clock: Clock): Pair<String, Instant> = usage.measure("auth") {
         limiter.throttle()
         val node = restClient.post()
             .uri("/oauth2/tokenP")
@@ -493,18 +488,23 @@ class KisApiClient(
                 ),
             )
             .exchange { _, res ->
-                val bytes = res.body.readAllBytes()
-                val n = objectMapper.readTree(bytes)
+                val n = runCatching { objectMapper.readTree(res.body.readAllBytes()) }.getOrNull() ?: objectMapper.createObjectNode()
                 if (!res.statusCode.is2xxSuccessful || !n.hasNonNull("access_token")) {
-                    throw AuthError(res.statusCode.value(), n.path("error_code").asText(null), "KIS 토큰 발급 실패: ${n.path("error_description").asText("")}")
+                    val status = res.statusCode.value()
+                    val code = n.path("error_code").asText(null)
+                    val detail = n.path("error_description").asText("")
+                    throw if (code == "EGW00133" || status == 429) {
+                        RateLimitError(status, code, "KIS 토큰 발급 유량 초과($code): $detail (발급은 1분당 1회 제한)", BrokerTokenManager.FAILURE_COOLDOWN_SECONDS)
+                    } else {
+                        AuthError(status, code, "KIS 토큰 발급 실패($code): $detail")
+                    }
                 }
                 n
-            }!!
+            }
 
-        val token = node.path("access_token").asText()
-        cachedToken = token to Instant.now().plusSeconds(node.path("expires_in").asLong(86400))
-        logger.info { "KIS token refreshed / expiresIn=${node.path("expires_in").asLong()}s" }
-        return token
+        val expiresIn = node.path("expires_in").asLong(86400)
+        logger.info { "KIS token issued / expiresIn=${expiresIn}s" }
+        node.path("access_token").asText() to clock.instant().plusSeconds(expiresIn)
     }
 
     private fun JsonNode.decimal(field: String): BigDecimal =
@@ -518,5 +518,8 @@ class KisApiClient(
     companion object {
         private val KST: ZoneId = KrxCalendar.KST
         private val DATE: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd")
+
+        /** 업무 호출이 토큰을 거부 — EGW00121 유효하지 않은 token, EGW00123 기간이 만료된 token (HTTP 500 으로 온다) */
+        private val TOKEN_REJECTED_CODES = setOf("EGW00121", "EGW00123")
     }
 }

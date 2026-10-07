@@ -19,7 +19,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -47,9 +46,7 @@ type NhClient struct {
 	environment       TradingEnvironment
 	http              *http.Client
 	limiter           *rateLimiter
-	tokenMu           sync.Mutex
-	token             string
-	tokenExpires      time.Time
+	tokens            *tokenManager
 	call              func(path string, body map[string]any) (map[string]any, error)
 }
 
@@ -62,6 +59,7 @@ func NewNhClient(appKey, appSecret, accountNo string) *NhClient {
 		http:        &http.Client{Timeout: 30 * time.Second},
 		limiter:     newRateLimiter(250*time.Millisecond, 3, func(a int) time.Duration { return time.Duration(a) * time.Second }),
 	}
+	c.tokens = newTokenManager("nh", appKey, 5*time.Minute, c.issueToken)
 	c.call = c.request
 	return c
 }
@@ -550,14 +548,12 @@ func (c *NhClient) account() (string, error) {
 }
 
 func (c *NhClient) request(path string, body map[string]any) (map[string]any, error) {
-	return c.limiter.execute("NH "+path, func() (map[string]any, error) { return c.requestOnce(path, body) })
+	return c.limiter.execute("NH "+path, func() (map[string]any, error) {
+		return c.tokens.call(func(token string) (map[string]any, error) { return c.requestOnce(path, body, token) })
+	})
 }
 
-func (c *NhClient) requestOnce(path string, body map[string]any) (map[string]any, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
+func (c *NhClient) requestOnce(path string, body map[string]any, token string) (map[string]any, error) {
 	payload, _ := json.Marshal(map[string]any{"Input_0": body})
 	status, parsed, resHeaders, err := httpJSONHeaders(c.http, "POST", c.baseURL+path, map[string]string{
 		"Content-Type": "application/json; charset=UTF-8", "authorization": "Bearer " + token,
@@ -598,12 +594,9 @@ func (c *NhClient) requestOnce(path string, body map[string]any) (map[string]any
 	return parsed, nil
 }
 
-func (c *NhClient) getToken() (_ string, err error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token != "" && time.Now().Before(c.tokenExpires.Add(-5*time.Minute)) {
-		return c.token, nil
-	}
+func (c *NhClient) getToken() (string, error) { return c.tokens.get() }
+
+func (c *NhClient) issueToken() (_ string, _ time.Time, err error) {
 	defer c.usage().Measure("auth")(&err) // 실제 발급 경로만 센다 (캐시 히트는 제외)
 	c.limiter.throttle.wait()
 	// SDK 규약: 파라미터는 쿼리스트링, 본문 없음, content-type 은 form-urlencoded
@@ -611,7 +604,7 @@ func (c *NhClient) getToken() (_ string, err error) {
 	status, body, err := httpJSON(c.http, "POST", c.authURL+"/oauth2/token?"+query.Encode(),
 		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, nil)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	token := str(body["access_token"])
 	if status != 200 || token == "" {
@@ -619,12 +612,11 @@ func (c *NhClient) getToken() (_ string, err error) {
 		if code == "" {
 			code = str(body["rsp_cd"])
 		}
-		return "", newAuthError(status, code, fmt.Sprintf("NH 토큰 발급 실패(%s): %s", code, str(body["message"])+str(body["rsp_msg"])))
+		msg := fmt.Sprintf("NH 토큰 발급 실패(%s): %s", code, str(body["message"])+str(body["rsp_msg"]))
+		if status == 429 || strings.HasPrefix(code, "IGW429") {
+			return "", time.Time{}, newRateLimitErrorWithRetryAfter(status, code, msg, TokenFailureCooldown.Seconds())
+		}
+		return "", time.Time{}, newAuthError(status, code, msg)
 	}
-	c.token = token
-	c.tokenExpires = time.Now().Add(time.Duration(nhVal(body["expires_in"]).IntPart()) * time.Second)
-	if c.tokenExpires.Before(time.Now().Add(time.Minute)) {
-		c.tokenExpires = time.Now().Add(24 * time.Hour)
-	}
-	return c.token, nil
+	return token, tokenExpiresIn(body["expires_in"], 24*time.Hour), nil
 }

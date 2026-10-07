@@ -17,6 +17,7 @@ import com.tripleauth.hermetix.broker.RateLimiter
 import com.tripleauth.hermetix.broker.TradingEnvironment
 import com.tripleauth.hermetix.broker.UsageTelemetry
 import com.tripleauth.hermetix.broker.symbolCode
+import com.tripleauth.hermetix.client.BrokerTokenManager
 import com.tripleauth.hermetix.client.dto.AccountResponse
 import com.tripleauth.hermetix.client.dto.BuyingPowerResponse
 import com.tripleauth.hermetix.client.dto.CalendarResponse
@@ -40,6 +41,7 @@ import org.springframework.http.MediaType
 import org.springframework.web.client.RestClient
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -60,10 +62,14 @@ import java.time.format.DateTimeFormatter
  * 문서로 확정하지 못한 점 (실측 필요): `bdy_cmpr_ccd` 부호 코드 의미(KIS 관례 4·5 하락으로 가정), 체결 조회 레코드 배열 이름(`Record1` 가정),
  * 체결 조회의 종목이 표준코드(`KR7005930003`)로만 와서 6자리 코드로 환산(ISIN 4~9번째 자리), 차트 TR 의 시장구분(KOSPI 기본), 오류코드 표(로그인 뒤)
  */
-class KbApiClient(
+class KbApiClient internal constructor(
     private val properties: KbApiProperties,
     private val objectMapper: ObjectMapper,
+    clock: Clock,
+    sleeper: (Long) -> Unit,
 ) : BrokerClient {
+
+    constructor(properties: KbApiProperties, objectMapper: ObjectMapper) : this(properties, objectMapper, Clock.systemUTC(), Thread::sleep)
 
     private val logger = KotlinLogging.logger { }
 
@@ -87,10 +93,10 @@ class KbApiClient(
 
     private val restClient = RestClient.builder().baseUrl(properties.baseUrl).build()
 
-    private val limiter = RateLimiter(properties.throttleMillis, maxRetries = 3, backoffMillis = { attempt -> 1000L * attempt })
+    private val limiter = RateLimiter(properties.throttleMillis, maxRetries = 3, backoffMillis = { attempt -> 1000L * attempt }, sleeper = sleeper)
 
-    @Volatile
-    private var cachedToken: Pair<String, Instant>? = null
+    /** 토큰 수명주기 — 메모리 → 파일 캐시 → 발급, 발급 실패 60초 쿨다운, 거부 토큰 폐기 후 1회 재시도 */
+    private val tokens = BrokerTokenManager("kb", properties.appKey, properties.tokenRefreshMarginSeconds, clock) { issueToken(clock) }
 
     // ------------------------------------------------------------------ market
 
@@ -302,14 +308,15 @@ class KbApiClient(
     private fun sameOrderNo(a: String, b: String): Boolean = a.trim().trimStart('0') == b.trim().trimStart('0')
 
     /** 응답 `dataBody` 를 돌려준다 */
-    private fun call(path: String, body: Map<String, String>): JsonNode = limiter.execute("KB $path") { callOnce(path, body) }
+    private fun call(path: String, body: Map<String, String>): JsonNode =
+        limiter.execute("KB $path") { tokens.call { token -> callOnce(path, body, token) } }
 
-    private fun callOnce(path: String, body: Map<String, String>): JsonNode =
+    private fun callOnce(path: String, body: Map<String, String>, token: String): JsonNode =
         restClient.post()
             .uri(path)
             .contentType(MediaType.APPLICATION_JSON)
             .headers { headers ->
-                headers.set("Authorization", "bearer ${token()}") // 명세·예제 모두 소문자 bearer
+                headers.set("Authorization", "bearer $token") // 명세·예제 모두 소문자 bearer
                 headers.set("appKey", properties.appKey)
             }
             .body(objectMapper.writeValueAsString(mapOf("dataHeader" to mapOf("ipAddr" to "", "macAddr" to ""), "dataBody" to body)))
@@ -338,17 +345,8 @@ class KbApiClient(
                 data
             }!!
 
-    private fun token(): String {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-        return refreshToken()
-    }
-
-    @Synchronized
-    private fun refreshToken(): String = usage.measure("auth") {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-
+    /** 토큰 발급 — 429 는 [RateLimitError] */
+    private fun issueToken(clock: Clock): Pair<String, Instant> = usage.measure("auth") {
         limiter.throttle()
         val node = restClient.post()
             .uri("/oauth2/token")
@@ -365,16 +363,18 @@ class KbApiClient(
                 val n = runCatching { objectMapper.readTree(res.body.readAllBytes()) }.getOrNull() ?: objectMapper.createObjectNode()
                 val data = n.path("dataBody")
                 if (!res.statusCode.is2xxSuccessful || !data.hasNonNull("access_token")) {
+                    val status = res.statusCode.value()
                     val h = n.path("dataHeader")
-                    throw AuthError(res.statusCode.value(), h.text("processCode").ifBlank { null }, "KB 토큰 발급 실패(${h.text("resultCode")}): ${h.text("processMessage").ifBlank { h.text("resultMessage") }}")
+                    val code = h.text("processCode").ifBlank { null }
+                    val msg = "KB 토큰 발급 실패(${h.text("resultCode")}): ${h.text("processMessage").ifBlank { h.text("resultMessage") }}"
+                    throw if (status == 429) RateLimitError(status, code, msg, BrokerTokenManager.FAILURE_COOLDOWN_SECONDS) else AuthError(status, code, msg)
                 }
                 data
-            }!!
+            }
 
-        val token = node.path("access_token").asText()
-        cachedToken = token to Instant.now().plusSeconds(node.path("expires_in").asLong(86400))
-        logger.info { "KB token refreshed / expiresIn=${node.path("expires_in").asLong(86400)}s" }
-        return token
+        val expiresIn = node.path("expires_in").asLong(86400)
+        logger.info { "KB token issued / expiresIn=${expiresIn}s" }
+        node.path("access_token").asText() to clock.instant().plusSeconds(expiresIn)
     }
 
     private fun BigDecimal.percentToRate(): BigDecimal = divide(BigDecimal(100), 6, RoundingMode.HALF_EVEN)

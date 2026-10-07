@@ -16,6 +16,7 @@ import type {
   Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, Quote, TradingEnvironment,
 } from "../models.js";
 import { symbolCodeFor } from "../models.js";
+import { FAILURE_COOLDOWN_SECONDS, TokenManager } from "../tokens.js";
 
 const FALLING_SIGNS = new Set(["4", "5"]);
 const t = (v: unknown): string => String(v ?? "").trim();
@@ -43,8 +44,7 @@ export class KbClient implements BrokerClient {
     environments: new Set<TradingEnvironment>(["LIVE"]),
   };
 
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+  private readonly tokens: TokenManager;
   private readonly limiter: RateLimiter;
 
   /** chartMarketClsf: 통합차트 시장구분 0 KOSPI / 1 KOSDAQ — 차트 TR 이 종목의 시장을 요구한다 */
@@ -59,7 +59,8 @@ export class KbClient implements BrokerClient {
     readonly environment: TradingEnvironment = "LIVE",
   ) {
     this.limiter = new RateLimiter(throttleMs, 3, (attempt) => 1000 * attempt);
-      this.usage = instrumentBroker(this);
+    this.tokens = new TokenManager("kb", appKey, () => this.issueToken(), 300);
+    this.usage = instrumentBroker(this);
   }
 
   async getQuotes(symbols: string[]): Promise<Quote[]> {
@@ -174,12 +175,12 @@ export class KbClient implements BrokerClient {
   }
 
   private call(path: string, body: Record<string, string>): Promise<Record<string, unknown>> {
-    return this.limiter.execute(() => this.callOnce(path, body), `KB ${path}`);
+    return this.limiter.execute(() => this.tokens.call((token) => this.callOnce(path, body, token)), `KB ${path}`);
   }
 
-  private async callOnce(path: string, body: Record<string, string>): Promise<Record<string, unknown>> {
+  private async callOnce(path: string, body: Record<string, string>, token: string): Promise<Record<string, unknown>> {
     const [status, parsed, resHeaders] = await httpJson(this.baseUrl + path, {
-      method: "POST", headers: { "Content-Type": "application/json", Authorization: `bearer ${await this.getToken()}`, appKey: this.appKey },
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `bearer ${token}`, appKey: this.appKey },
       body: JSON.stringify({ dataHeader: { ipAddr: "", macAddr: "" }, dataBody: body }),
     });
     const header = (parsed.dataHeader ?? {}) as Record<string, unknown>;
@@ -201,19 +202,19 @@ export class KbClient implements BrokerClient {
     return data;
   }
 
-  private async getToken(): Promise<string> {
+  private issueToken(): Promise<{ token: string; expiresAt: number }> {
     return this.usage.measure("auth", async () => {
-    if (this.token && Date.now() < this.tokenExpiresAt - 300_000) return this.token;
-    await this.limiter.throttle.wait();
-    const [status, body] = await httpJson(`${this.baseUrl}/oauth2/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dataHeader: { ipAddr: "", macAddr: "" }, dataBody: { appKey: this.appKey, appSecret: this.appSecret, grantType: "client_credentials" } }) });
-    const data = (body.dataBody ?? {}) as Record<string, unknown>;
-    if (status !== 200 || typeof data.access_token !== "string") {
-      const h = (body.dataHeader ?? {}) as Record<string, unknown>;
-      throw new AuthError(status, t(h.processCode) || null, `KB 토큰 발급 실패(${t(h.resultCode)}): ${t(h.processMessage) || t(h.resultMessage)}`);
-    }
-    this.token = data.access_token;
-    this.tokenExpiresAt = Date.now() + Number(data.expires_in ?? 86400) * 1000;
-    return this.token;
+      await this.limiter.throttle.wait();
+      const [status, body] = await httpJson(`${this.baseUrl}/oauth2/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dataHeader: { ipAddr: "", macAddr: "" }, dataBody: { appKey: this.appKey, appSecret: this.appSecret, grantType: "client_credentials" } }) });
+      const data = (body.dataBody ?? {}) as Record<string, unknown>;
+      if (status !== 200 || typeof data.access_token !== "string") {
+        const h = (body.dataHeader ?? {}) as Record<string, unknown>;
+        const code = t(h.processCode) || null;
+        const msg = `KB 토큰 발급 실패(${t(h.resultCode)}): ${t(h.processMessage) || t(h.resultMessage)}`;
+        if (status === 429) throw new RateLimitError(status, code, msg, FAILURE_COOLDOWN_SECONDS);
+        throw new AuthError(status, code, msg);
+      }
+      return { token: data.access_token, expiresAt: Date.now() + Number(data.expires_in ?? 86400) * 1000 };
     });
   }
 }

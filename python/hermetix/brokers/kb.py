@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -23,6 +22,7 @@ from ..models import (
     Account, BrokerCapabilities, Candle, CandleInterval, CreateOrderRequest,
     Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, OrderType, Quote, TradingEnvironment,
 )
+from ..tokens import FAILURE_COOLDOWN_SECONDS, TokenManager
 from .nh import _d, _pct
 
 _FALLING_SIGNS = {"4", "5"}
@@ -59,9 +59,7 @@ class KbClient(BrokerClient):
         self._chart_market_clsf = chart_market_clsf
         self._http = _Http(base_url)
         self._limiter = RateLimiter(throttle_seconds, max_retries=3, backoff=lambda attempt: 1.0 * attempt)
-        self._token: str | None = None
-        self._token_expires_at = 0.0
-        self._token_lock = threading.Lock()
+        self._tokens = TokenManager("kb", app_key, self._issue_token, 300)
 
     # ------------------------------------------------------------------ market
 
@@ -222,10 +220,10 @@ class KbClient(BrokerClient):
                      filled_quantity=filled, avg_fill_price=avg if avg and avg > 0 else None)
 
     def _call(self, path: str, body: dict) -> dict:
-        return self._limiter.execute(lambda: self._call_once(path, body), f"KB {path}")
+        return self._limiter.execute(lambda: self._tokens.call(lambda token: self._call_once(path, body, token)), f"KB {path}")
 
-    def _call_once(self, path: str, body: dict) -> dict:
-        headers = {"Authorization": f"bearer {self._get_token()}", "appKey": self._app_key}
+    def _call_once(self, path: str, body: dict, token: str) -> dict:
+        headers = {"Authorization": f"bearer {token}", "appKey": self._app_key}
         status, parsed = self._http.request("POST", path, headers=headers,
                                             json_body={"dataHeader": {"ipAddr": "", "macAddr": ""}, "dataBody": body})
         header = parsed.get("dataHeader") or {}
@@ -256,24 +254,23 @@ class KbClient(BrokerClient):
         return data
 
     def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 300:
-            return self._token
-        with self._token_lock:
-            if self._token and time.time() < self._token_expires_at - 300:
-                return self._token
-            with self._usage.measure("auth"):
-                self._limiter.throttle.wait()
-                status, body = self._http.request("POST", "/oauth2/token", json_body={
-                    "dataHeader": {"ipAddr": "", "macAddr": ""},
-                    "dataBody": {"appKey": self._app_key, "appSecret": self._app_secret, "grantType": "client_credentials"}})
-                data = body.get("dataBody") or {}
-                if status != 200 or not data.get("access_token"):
-                    h = body.get("dataHeader") or {}
-                    raise AuthError(status, _t(h.get("processCode")) or None,
-                                    f"KB 토큰 발급 실패({_t(h.get('resultCode'))}): {_t(h.get('processMessage')) or _t(h.get('resultMessage'))}")
-                self._token = data["access_token"]
-                self._token_expires_at = time.time() + float(data.get("expires_in", 86400))
-                return self._token
+        return self._tokens.get()
+
+    def _issue_token(self) -> tuple[str, float]:
+        with self._usage.measure("auth"):
+            self._limiter.throttle.wait()
+            status, body = self._http.request("POST", "/oauth2/token", json_body={
+                "dataHeader": {"ipAddr": "", "macAddr": ""},
+                "dataBody": {"appKey": self._app_key, "appSecret": self._app_secret, "grantType": "client_credentials"}})
+            data = body.get("dataBody") or {}
+            if status != 200 or not data.get("access_token"):
+                h = body.get("dataHeader") or {}
+                code = _t(h.get("processCode")) or None
+                msg = f"KB 토큰 발급 실패({_t(h.get('resultCode'))}): {_t(h.get('processMessage')) or _t(h.get('resultMessage'))}"
+                if status == 429:
+                    raise RateLimitError(status, code, msg, FAILURE_COOLDOWN_SECONDS)
+                raise AuthError(status, code, msg)
+            return data["access_token"], time.time() + float(data.get("expires_in", 86400))
 
 
 def _t(value) -> str:

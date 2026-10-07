@@ -24,6 +24,7 @@ import type {
   Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, OrderType, Quote, TradingEnvironment,
 } from "../models.js";
 import { symbolCodeFor } from "../models.js";
+import { FAILURE_COOLDOWN_SECONDS, TokenManager } from "../tokens.js";
 
 interface NextError { type?: string; code?: string; message?: string; requestId?: string; }
 
@@ -75,8 +76,7 @@ export class NextClient implements BrokerClient {
     environments: new Set<TradingEnvironment>(["PAPER", "LIVE"]), // 키 프리픽스로 결정 (pk_test_ / pk_live_)
   };
 
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+  private readonly tokens: TokenManager;
   /** 429 는 Retry-After 만큼 기다렸다가 최대 2회 재시도. 쓰로틀은 없다 (초당 한도가 넉넉함) */
   private readonly limiter = new RateLimiter(0, 2, (attempt) => 1000 * attempt);
 
@@ -92,7 +92,8 @@ export class NextClient implements BrokerClient {
     if (clientId.startsWith("pk_") && !clientId.startsWith(expected)) {
       throw new Error(`environment=${environment} 인데 clientId 가 '${expected}' 로 시작하지 않습니다 (모의=pk_test_, 실전=pk_live_). 키와 환경 설정을 맞추세요.`);
     }
-      this.usage = instrumentBroker(this);
+    this.tokens = new TokenManager("next", clientId, () => this.issueToken(), 60);
+    this.usage = instrumentBroker(this);
   }
 
   // ---------------------------------------------------------------- market
@@ -252,9 +253,9 @@ export class NextClient implements BrokerClient {
     method: string, path: string,
     opts: { account?: boolean; json?: Record<string, unknown> } = {},
   ): Promise<Record<string, unknown>> {
-    const call = async (): Promise<Record<string, unknown>> => {
+    const call = async (token: string): Promise<Record<string, unknown>> => {
       const headers: Record<string, string> = {
-        Authorization: `Bearer ${await this.getToken()}`,
+        Authorization: `Bearer ${token}`,
         [NEXT_REQUEST_ID_HEADER]: newRequestId(),
       };
       if (opts.account) headers[NEXT_ACCOUNT_HEADER] = this.accountId;
@@ -268,17 +269,8 @@ export class NextClient implements BrokerClient {
       }
       return body;
     };
-    return this.limiter.execute(async () => {
-      try {
-        return await call();
-      } catch (e) {
-        if (e instanceof AuthError) {
-          this.token = null; // 토큰 만료 - 1회 재발급 후 재시도
-          return call();
-        }
-        throw e;
-      }
-    }, "next");
+    // 토큰 거부(만료) 시 1회 재발급 후 재시도는 TokenManager.call
+    return this.limiter.execute(() => this.tokens.call(call), "next");
   }
 
   /**
@@ -299,36 +291,38 @@ export class NextClient implements BrokerClient {
     return new BrokerApiError(status, code, message);
   }
 
-  private async getToken(): Promise<string> {
+  private issueToken(): Promise<{ token: string; expiresAt: number }> {
     return this.usage.measure("auth", async () => {
-    if (this.token && Date.now() < this.tokenExpiresAt - 60_000) return this.token;
-    const form = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: this.clientId,
-      client_secret: this.clientSecret,
-    });
-    const [status, body] = await httpJson(`${this.baseUrl}/v1/oauth/token`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        [NEXT_REQUEST_ID_HEADER]: newRequestId(),
-      },
-      body: form.toString(),
-    });
-    if (status !== 200 || typeof body.access_token !== "string") throw this.tokenError(status, body);
-    this.token = body.access_token;
-    this.tokenExpiresAt = Date.now() + Number(body.expires_in ?? 43200) * 1000;
-    return this.token;
+      const form = new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+      });
+      const [status, body, resHeaders] = await httpJson(`${this.baseUrl}/v1/oauth/token`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          [NEXT_REQUEST_ID_HEADER]: newRequestId(),
+        },
+        body: form.toString(),
+      });
+      if (status !== 200 || typeof body.access_token !== "string") {
+        const retryAfter = Number(resHeaders?.["retry-after"]);
+        throw this.tokenError(status, body, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null);
+      }
+      return { token: body.access_token, expiresAt: Date.now() + Number(body.expires_in ?? 43200) * 1000 };
     });
   }
 
-  private tokenError(status: number, body: Record<string, unknown>): AuthError {
+  private tokenError(status: number, body: Record<string, unknown>, retryAfterSeconds: number | null = null): BrokerApiError {
     // 토큰 발급 400/401 은 OAuth 표준 형식: {"error":"invalid_client","error_description":"..."}
     if (typeof body.error === "string") {
       return new AuthError(status, body.error, `Next 토큰 발급 실패(${body.error}): ${body.error_description ?? ""}`);
     }
     // 429/5xx 는 플랫폼 엔벨로프: {"error":{"code":..,"message":..}}
     const error = (body.error ?? {}) as NextError;
-    return new AuthError(status, error.code ?? null, `Next 토큰 발급 실패(${error.code}): ${error.message ?? ""}`);
+    const message = `Next 토큰 발급 실패(${error.code}): ${error.message ?? ""}`;
+    if (status === 429) return new RateLimitError(status, error.code ?? null, message, retryAfterSeconds ?? FAILURE_COOLDOWN_SECONDS);
+    return new AuthError(status, error.code ?? null, message);
   }
 }

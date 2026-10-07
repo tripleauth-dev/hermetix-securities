@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -40,9 +39,7 @@ type TossClient struct {
 	environment            TradingEnvironment
 	http                   *http.Client
 	limiter                *rateLimiter
-	tokenMu                sync.Mutex
-	token                  string
-	tokenExpires           time.Time
+	tokens                 *tokenManager
 	call                   func(method, path string, query map[string]string, jsonBody map[string]any, account bool) (any, error)
 }
 
@@ -53,6 +50,7 @@ func NewTossClient(clientID, clientSecret, accountSeq string) *TossClient {
 		http:    &http.Client{Timeout: 30 * time.Second},
 		limiter: newRateLimiter(200*time.Millisecond, 3, func(a int) time.Duration { return time.Duration(1<<(a-1)) * time.Second }),
 	}
+	c.tokens = newTokenManager("toss", clientID, time.Minute, c.issueToken)
 	c.call = c.request
 	return c
 }
@@ -433,7 +431,9 @@ func (c *TossClient) account() (string, error) {
 func (c *TossClient) request(method, path string, query map[string]string, jsonBody map[string]any, account bool) (any, error) {
 	var result any
 	_, err := c.limiter.execute("toss "+path, func() (map[string]any, error) {
-		body, err := c.requestOnce(method, path, query, jsonBody, account)
+		body, err := c.tokens.call(func(token string) (map[string]any, error) {
+			return c.requestOnce(method, path, query, jsonBody, account, token)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -443,11 +443,7 @@ func (c *TossClient) request(method, path string, query map[string]string, jsonB
 	return result, err
 }
 
-func (c *TossClient) requestOnce(method, path string, query map[string]string, jsonBody map[string]any, account bool) (map[string]any, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
+func (c *TossClient) requestOnce(method, path string, query map[string]string, jsonBody map[string]any, account bool, token string) (map[string]any, error) {
 	headers := map[string]string{"Authorization": "Bearer " + token}
 	if account {
 		acct, err := c.account()
@@ -494,29 +490,36 @@ func (c *TossClient) requestOnce(method, path string, query map[string]string, j
 	return parsed, nil
 }
 
-func (c *TossClient) getToken() (_ string, err error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token != "" && time.Now().Before(c.tokenExpires.Add(-time.Minute)) {
-		return c.token, nil
-	}
+func (c *TossClient) getToken() (string, error) { return c.tokens.get() }
+
+func (c *TossClient) issueToken() (_ string, _ time.Time, err error) {
 	defer c.usage().Measure("auth")(&err) // 실제 발급 경로만 센다 (캐시 히트는 제외)
 	c.limiter.throttle.wait()
 	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {c.clientID}, "client_secret": {c.clientSecret}}
-	status, body, err := httpJSON(c.http, "POST", c.baseURL+"/oauth2/token",
+	status, body, resHeaders, err := httpJSONHeaders(c.http, "POST", c.baseURL+"/oauth2/token",
 		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, []byte(form.Encode()))
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	token := str(body["access_token"])
 	if status != 200 || token == "" {
-		code := str(body["error"])
-		return "", newAuthError(status, code, fmt.Sprintf("토스 토큰 발급 실패(%s): %s", code, str(body["error_description"])))
+		// OAuth 표준 {"error":"invalid_client","error_description":..} 또는 플랫폼 엔벨로프 {"error":{"code":..,"message":..}}
+		code, detail := str(body["error"]), str(body["error_description"])
+		if e, ok := body["error"].(map[string]any); ok {
+			code = str(e["code"])
+			if detail == "" {
+				detail = str(e["message"])
+			}
+		}
+		msg := fmt.Sprintf("토스 토큰 발급 실패(%s): %s", code, detail)
+		if status == 429 {
+			retryAfter, _ := strconv.ParseFloat(strings.TrimSpace(resHeaders.Get("Retry-After")), 64)
+			if retryAfter <= 0 {
+				retryAfter = TokenFailureCooldown.Seconds()
+			}
+			return "", time.Time{}, newRateLimitErrorWithRetryAfter(status, code, msg, retryAfter)
+		}
+		return "", time.Time{}, newAuthError(status, code, msg)
 	}
-	c.token = token
-	c.tokenExpires = time.Now().Add(time.Duration(nhVal(body["expires_in"]).IntPart()) * time.Second)
-	if c.tokenExpires.Before(time.Now().Add(time.Minute)) {
-		c.tokenExpires = time.Now().Add(24 * time.Hour)
-	}
-	return c.token, nil
+	return token, tokenExpiresIn(body["expires_in"], 24*time.Hour), nil
 }

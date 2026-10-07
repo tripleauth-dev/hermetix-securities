@@ -13,6 +13,7 @@ import {
 import type { MarketStream, StreamingBrokerClient } from "../broker.js";
 import { KiwoomMarketStream } from "./kiwoomStream.js";
 import { AuthError, BrokerApiError, MarketClosedError, OrderNotFoundError, RateLimitError } from "../errors.js";
+import { FAILURE_COOLDOWN_SECONDS, TokenManager } from "../tokens.js";
 import type {
   Account, BrokerCapabilities, Candle, CandleInterval, CreateOrderRequest,
   Fill, Holding, MarketDay, Order, Quote,
@@ -47,8 +48,7 @@ export class KiwoomClient implements StreamingBrokerClient {
     streams: new Set(["TRADES", "ORDER_BOOK", "ORDER_EVENTS"]),
   };
 
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+  private readonly tokens: TokenManager;
   /** TR 당 초당 1회 유량 제한 — 쓰로틀 + 백오프 재시도 */
   private readonly limiter: RateLimiter;
 
@@ -71,7 +71,8 @@ export class KiwoomClient implements StreamingBrokerClient {
     this.baseUrl = baseUrl || (environment === "LIVE" ? KiwoomClient.LIVE_URL : KiwoomClient.PAPER_URL);
     this.wsUrl = wsUrl || (environment === "LIVE" ? KiwoomClient.LIVE_WS_URL : KiwoomClient.PAPER_WS_URL);
     this.limiter = new RateLimiter(throttleMs, 3, (attempt) => 1100 * attempt);
-      this.usage = instrumentBroker(this);
+    this.tokens = new TokenManager("kiwoom", appkey, () => this.issueToken(), 300);
+    this.usage = instrumentBroker(this);
   }
 
   // ---------------------------------------------------------------- market
@@ -255,15 +256,15 @@ export class KiwoomClient implements StreamingBrokerClient {
   }
 
   private async call(path: string, apiId: string, json: Record<string, string>): Promise<Record<string, unknown>> {
-    return this.limiter.execute(() => this.callOnce(path, apiId, json), `키움 ${apiId}`);
+    return this.limiter.execute(() => this.tokens.call((token) => this.callOnce(path, apiId, json, token)), `키움 ${apiId}`);
   }
 
-  private async callOnce(path: string, apiId: string, json: Record<string, string>): Promise<Record<string, unknown>> {
+  private async callOnce(path: string, apiId: string, json: Record<string, string>, token: string): Promise<Record<string, unknown>> {
     const [status, body] = await httpJson(this.baseUrl + path, {
       method: "POST",
       headers: {
         "Content-Type": "application/json;charset=UTF-8",
-        authorization: `Bearer ${await this.getToken()}`,
+        authorization: `Bearer ${token}`,
         "api-id": apiId,
       },
       body: JSON.stringify(json),
@@ -273,31 +274,36 @@ export class KiwoomClient implements StreamingBrokerClient {
       const msg = `키움(${apiId}) ${body.return_msg ?? ""}`.trim();
       if (msg.includes("요청 개수를 초과")) throw new RateLimitError(status, code, msg);
       if (msg.includes("장종료") || msg.includes("RC4058")) throw new MarketClosedError(status, code, msg);
-      if (status === 401) throw new AuthError(status, code, msg);
+      if (status === 401 || msg.includes("8005")) throw new AuthError(status, code, msg); // 8005: Token이 유효하지 않습니다
       throw new BrokerApiError(status, code, msg);
     }
     return body;
   }
 
-  private async getToken(): Promise<string> {
+  private getToken(): Promise<string> {
+    return this.tokens.get();
+  }
+
+  private issueToken(): Promise<{ token: string; expiresAt: number }> {
     return this.usage.measure("auth", async () => {
-    if (this.token && Date.now() < this.tokenExpiresAt - 300_000) return this.token;
-    await this.limiter.throttle.wait();
-    const [status, body] = await httpJson(`${this.baseUrl}/oauth2/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json;charset=UTF-8" },
-      body: JSON.stringify({ grant_type: "client_credentials", appkey: this.appkey, secretkey: this.secretkey }),
-    });
-    if (status !== 200 || body.return_code !== 0 || typeof body.token !== "string") {
-      throw new AuthError(status, String(body.return_code ?? ""), `키움 토큰 발급 실패: ${body.return_msg ?? ""}`);
-    }
-    this.token = body.token;
-    // expires_dt: yyyyMMddHHmmss (KST)
-    const dt = String(body.expires_dt ?? "");
-    this.tokenExpiresAt = dt.length === 14
-      ? new Date(`${dt.slice(0, 4)}-${dt.slice(4, 6)}-${dt.slice(6, 8)}T${dt.slice(8, 10)}:${dt.slice(10, 12)}:${dt.slice(12, 14)}+09:00`).getTime()
-      : Date.now() + 86400_000;
-    return this.token;
+      await this.limiter.throttle.wait();
+      const [status, body] = await httpJson(`${this.baseUrl}/oauth2/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json;charset=UTF-8" },
+        body: JSON.stringify({ grant_type: "client_credentials", appkey: this.appkey, secretkey: this.secretkey }),
+      });
+      if (status !== 200 || body.return_code !== 0 || typeof body.token !== "string") {
+        const code = String(body.return_code ?? "");
+        const msg = `키움 토큰 발급 실패: ${body.return_msg ?? ""}`;
+        if (status === 429 || msg.includes("요청 개수를 초과")) throw new RateLimitError(status, code, msg, FAILURE_COOLDOWN_SECONDS);
+        throw new AuthError(status, code, msg);
+      }
+      // expires_dt: yyyyMMddHHmmss (KST)
+      const dt = String(body.expires_dt ?? "");
+      const expiresAt = dt.length === 14
+        ? new Date(`${dt.slice(0, 4)}-${dt.slice(4, 6)}-${dt.slice(6, 8)}T${dt.slice(8, 10)}:${dt.slice(10, 12)}:${dt.slice(12, 14)}+09:00`).getTime()
+        : NaN;
+      return { token: body.token, expiresAt: Number.isFinite(expiresAt) ? expiresAt : Date.now() + 86400_000 };
     });
   }
 }
