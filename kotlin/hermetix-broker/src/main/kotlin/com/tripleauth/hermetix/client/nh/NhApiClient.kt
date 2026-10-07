@@ -18,6 +18,7 @@ import com.tripleauth.hermetix.broker.RateLimiter
 import com.tripleauth.hermetix.broker.TradingEnvironment
 import com.tripleauth.hermetix.broker.UsageTelemetry
 import com.tripleauth.hermetix.broker.symbolCode
+import com.tripleauth.hermetix.client.BrokerTokenManager
 import com.tripleauth.hermetix.client.dto.AccountResponse
 import com.tripleauth.hermetix.client.dto.BuyingPowerResponse
 import com.tripleauth.hermetix.client.dto.CalendarResponse
@@ -41,6 +42,7 @@ import org.springframework.http.MediaType
 import org.springframework.web.client.RestClient
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -65,10 +67,14 @@ import java.time.format.DateTimeFormatter
  * - 등락률(`prdy_ctrt`)·수익률(`pft_rt`) 단위는 % 로 추정 → 비율로 변환
  * - 응답 숫자가 문자열/숫자 중 무엇인지 → 양쪽 허용 파서
  */
-class NhApiClient(
+class NhApiClient internal constructor(
     private val properties: NhApiProperties,
     private val objectMapper: ObjectMapper,
+    clock: Clock,
+    sleeper: (Long) -> Unit,
 ) : StreamingBrokerClient {
+
+    constructor(properties: NhApiProperties, objectMapper: ObjectMapper) : this(properties, objectMapper, Clock.systemUTC(), Thread::sleep)
 
     private val logger = KotlinLogging.logger { }
 
@@ -101,13 +107,17 @@ class NhApiClient(
         minIntervalMillis = properties.throttleMillis,
         maxRetries = 3,
         backoffMillis = { attempt -> 1000L * attempt },
+        sleeper = sleeper,
     )
 
-    @Volatile
-    private var cachedToken: Pair<String, Instant>? = null
+    /** 토큰 수명주기 — 메모리 → 파일 캐시 → 발급, 발급 실패 60초 쿨다운, 거부 토큰 폐기 후 1회 재시도 */
+    private val tokens = BrokerTokenManager("nh", properties.appKey, properties.tokenRefreshMarginSeconds, clock) { issueToken(clock) }
 
     @Volatile
     private var resolvedAccountNo: String = properties.accountNo
+
+    /** 계좌 조회 전용 잠금 — 토큰 잠금과 분리 (계좌 조회 호출이 토큰 발급을 거친다) */
+    private val accountLock = Any()
 
     // ------------------------------------------------------------------ market
 
@@ -333,7 +343,7 @@ class NhApiClient(
     /** 계좌번호 — 설정이 비어 있으면 `/n2/acctinfo` 에서 환경에 맞는 acct_type 의 첫 계좌를 고른다 */
     private fun accountNo(): String {
         resolvedAccountNo.takeIf { it.isNotBlank() }?.let { return it }
-        synchronized(this) {
+        synchronized(accountLock) {
             resolvedAccountNo.takeIf { it.isNotBlank() }?.let { return it }
             val expected = properties.expectedAcctType()
             val accounts = call("/n2/acctinfo", emptyMap()).path("Output_0").toList()
@@ -345,14 +355,15 @@ class NhApiClient(
         }
     }
 
-    private fun call(path: String, input: Map<String, Any>): JsonNode = limiter.execute("NH $path") { callOnce(path, input) }
+    private fun call(path: String, input: Map<String, Any>): JsonNode =
+        limiter.execute("NH $path") { tokens.call { token -> callOnce(path, input, token) } }
 
-    private fun callOnce(path: String, input: Map<String, Any>): JsonNode {
+    private fun callOnce(path: String, input: Map<String, Any>, token: String): JsonNode {
         val response = restClient.post()
             .uri(path)
             .contentType(MediaType.APPLICATION_JSON)
             .headers { headers ->
-                headers.set("authorization", "Bearer ${token()}")
+                headers.set("authorization", "Bearer $token")
                 headers.set("x-client-id", properties.appKey)
                 headers.set("x-client-secret", properties.appSecret)
             }
@@ -387,17 +398,10 @@ class NhApiClient(
         return response
     }
 
-    internal fun token(): String {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-        return refreshToken()
-    }
+    internal fun token(): String = tokens.get()
 
-    @Synchronized
-    private fun refreshToken(): String = usage.measure("auth") {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-
+    /** 토큰 발급 — 유량 초과(429·`IGW429*`)는 [RateLimitError] */
+    private fun issueToken(clock: Clock): Pair<String, Instant> = usage.measure("auth") {
         limiter.throttle()
         // SDK 규약: 파라미터는 쿼리스트링, 본문 없음, content-type 은 form-urlencoded
         val node = authClient.post()
@@ -413,16 +417,21 @@ class NhApiClient(
             .exchange { _, res ->
                 val n = runCatching { objectMapper.readTree(res.body.readAllBytes()) }.getOrNull() ?: objectMapper.createObjectNode()
                 if (!res.statusCode.is2xxSuccessful || !n.hasNonNull("access_token")) {
-                    val code = n.path("code").asText(n.path("rsp_cd").asText(null))
-                    throw AuthError(res.statusCode.value(), code, "NH 토큰 발급 실패($code): ${n.path("message").asText(n.path("rsp_msg").asText(""))}")
+                    val status = res.statusCode.value()
+                    val code = n.path("code").asText(n.path("rsp_cd").asText("")).trim()
+                    val msg = "NH 토큰 발급 실패($code): ${n.path("message").asText(n.path("rsp_msg").asText(""))}"
+                    throw if (status == 429 || code.startsWith("IGW429")) {
+                        RateLimitError(status, code, msg, BrokerTokenManager.FAILURE_COOLDOWN_SECONDS)
+                    } else {
+                        AuthError(status, code.ifBlank { null }, msg)
+                    }
                 }
                 n
-            }!!
+            }
 
-        val token = node.path("access_token").asText()
-        cachedToken = token to Instant.now().plusSeconds(node.path("expires_in").asLong(86400))
-        logger.info { "NH token refreshed / expiresIn=${node.path("expires_in").asLong(86400)}s" }
-        return token
+        val expiresIn = node.path("expires_in").asLong(86400)
+        logger.info { "NH token issued / expiresIn=${expiresIn}s" }
+        node.path("access_token").asText() to clock.instant().plusSeconds(expiresIn)
     }
 
     private fun BigDecimal.percentToRate(): BigDecimal = divide(BigDecimal(100), 6, RoundingMode.HALF_EVEN)

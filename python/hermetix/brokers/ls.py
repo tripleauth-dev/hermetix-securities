@@ -11,7 +11,6 @@ TR 별 TPS(시세 3, 차트 1, 계좌 2, 예수금 1, 주문 10) → 전역 0.5s
 """
 from __future__ import annotations
 
-import threading
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -24,6 +23,7 @@ from ..models import (
     Account, BrokerCapabilities, Candle, CandleInterval, CreateOrderRequest,
     Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, OrderType, Quote, StreamChannel, TradingEnvironment,
 )
+from ..tokens import FAILURE_COOLDOWN_SECONDS, TokenManager
 from .ls_stream import LsMarketStream
 from .nh import _d, _pct
 
@@ -65,9 +65,7 @@ class LsClient(StreamingBrokerClient):
         self._http = _Http(base_url)
         self._limiter = RateLimiter(throttle_seconds, max_retries=3, backoff=lambda attempt: 1.0 * attempt)
         self._chart_limiter = RateLimiter(chart_throttle_seconds, max_retries=0)  # 차트 TR 초당 1건
-        self._token: str | None = None
-        self._token_expires_at = 0.0
-        self._token_lock = threading.Lock()
+        self._tokens = TokenManager("ls", app_key, self._issue_token, 600)
 
     # ------------------------------------------------------------------ market
 
@@ -221,10 +219,11 @@ class LsClient(StreamingBrokerClient):
                      filled_quantity=filled, avg_fill_price=avg if avg and avg > 0 else None)
 
     def _call(self, path: str, tr_cd: str, in_block: str, body: dict) -> dict:
-        return self._limiter.execute(lambda: self._call_once(path, tr_cd, in_block, body), f"LS {tr_cd}")
+        return self._limiter.execute(lambda: self._tokens.call(lambda token: self._call_once(path, tr_cd, in_block, body, token)),
+                                     f"LS {tr_cd}")
 
-    def _call_once(self, path: str, tr_cd: str, in_block: str, body: dict) -> dict:
-        headers = {"authorization": f"Bearer {self._get_token()}", "tr_cd": tr_cd, "tr_cont": "N", "tr_cont_key": ""}
+    def _call_once(self, path: str, tr_cd: str, in_block: str, body: dict, token: str) -> dict:
+        headers = {"authorization": f"Bearer {token}", "tr_cd": tr_cd, "tr_cont": "N", "tr_cont_key": ""}
         if self._mac_address:
             headers["mac_address"] = self._mac_address
         status, parsed = self._http.request("POST", path, headers=headers, json_body={in_block: body})
@@ -258,21 +257,20 @@ class LsClient(StreamingBrokerClient):
         return LsMarketStream(self._ws_url, self._get_token, usage=self._usage)
 
     def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 600:
-            return self._token
-        with self._token_lock:
-            if self._token and time.time() < self._token_expires_at - 600:
-                return self._token
-            with self._usage.measure("auth"):
-                self._limiter.throttle.wait()
-                status, body = self._http.request("POST", "/oauth2/token", form_body={
-                    "grant_type": "client_credentials", "appkey": self._app_key, "appsecretkey": self._app_secret, "scope": "oob"})
-                if status != 200 or not body.get("access_token"):
-                    code = body.get("error_code") or body.get("rsp_cd")
-                    raise AuthError(status, code, f"LS 토큰 발급 실패({code}): {body.get('error_description') or body.get('rsp_msg') or ''}")
-                self._token = body["access_token"]
-                self._token_expires_at = time.time() + float(body.get("expires_in", 86400))
-                return self._token
+        return self._tokens.get()
+
+    def _issue_token(self) -> tuple[str, float]:
+        with self._usage.measure("auth"):
+            self._limiter.throttle.wait()
+            status, body = self._http.request("POST", "/oauth2/token", form_body={
+                "grant_type": "client_credentials", "appkey": self._app_key, "appsecretkey": self._app_secret, "scope": "oob"})
+            if status != 200 or not body.get("access_token"):
+                code = body.get("error_code") or body.get("rsp_cd")
+                detail = body.get("error_description") or body.get("rsp_msg") or ""
+                if code == "IGW00201" or status == 429:
+                    raise RateLimitError(status, code, f"LS 토큰 발급 유량 초과({code}): {detail}", FAILURE_COOLDOWN_SECONDS)
+                raise AuthError(status, code, f"LS 토큰 발급 실패({code}): {detail}")
+            return body["access_token"], time.time() + float(body.get("expires_in", 86400))
 
 
 def _side_of(row: dict) -> OrderSide:

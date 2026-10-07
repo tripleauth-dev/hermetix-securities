@@ -26,6 +26,7 @@ from ..models import (
     Account, BrokerCapabilities, Candle, CandleInterval, CreateOrderRequest,
     Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, OrderType, Quote, StreamChannel, TradingEnvironment,
 )
+from ..tokens import FAILURE_COOLDOWN_SECONDS, TokenManager
 from .nh_stream import NhMarketStream
 
 _SUCCESS_CODES = {"00000", "00166", "00221", "13578", "00165", "00218"}
@@ -107,9 +108,8 @@ class NhClient(StreamingBrokerClient):
         self._http = _Http(base_url or (self.LIVE_URL if environment == TradingEnvironment.LIVE else self.PAPER_URL))
         self._auth_http = _Http(auth_url)
         self._limiter = RateLimiter(throttle_seconds, max_retries=3, backoff=lambda attempt: 1.0 * attempt)
-        self._token: str | None = None
-        self._token_expires_at = 0.0
-        self._token_lock = threading.Lock()
+        self._tokens = TokenManager("nh", app_key, self._issue_token, 300)
+        self._account_lock = threading.Lock()
 
     # ------------------------------------------------------------------ market
 
@@ -279,7 +279,7 @@ class NhClient(StreamingBrokerClient):
     def _account(self) -> str:
         if self._account_no:
             return self._account_no
-        with self._token_lock:
+        with self._account_lock:
             if self._account_no:
                 return self._account_no
             expected = "01" if self.environment == TradingEnvironment.LIVE else "03"
@@ -291,10 +291,10 @@ class NhClient(StreamingBrokerClient):
             return self._account_no
 
     def _call(self, path: str, body: dict) -> dict:
-        return self._limiter.execute(lambda: self._call_once(path, body), f"NH {path}")
+        return self._limiter.execute(lambda: self._tokens.call(lambda token: self._call_once(path, body, token)), f"NH {path}")
 
-    def _call_once(self, path: str, body: dict) -> dict:
-        headers = {"authorization": f"Bearer {self._get_token()}", "x-client-id": self._app_key, "x-client-secret": self._app_secret}
+    def _call_once(self, path: str, body: dict, token: str) -> dict:
+        headers = {"authorization": f"Bearer {token}", "x-client-id": self._app_key, "x-client-secret": self._app_secret}
         status, parsed = self._http.request("POST", path, headers=headers, json_body={"Input_0": body})
         rsp_cd = str(parsed.get("rsp_cd", "")).strip()
         rsp_msg = str(parsed.get("rsp_msg", ""))
@@ -325,23 +325,22 @@ class NhClient(StreamingBrokerClient):
         return NhMarketStream(self._ws_url, self._get_token, market_cd=self._market_cd, account_no=self._account_no, usage=self._usage)
 
     def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 300:
-            return self._token
-        with self._token_lock:
-            if self._token and time.time() < self._token_expires_at - 300:
-                return self._token
-            with self._usage.measure("auth"):
-                self._limiter.throttle.wait()
-                # SDK 규약: 파라미터는 쿼리스트링, 본문 없음, content-type 은 form-urlencoded
-                status, body = self._auth_http.request(
-                    "POST", "/oauth2/token", headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    query={"appkey": self._app_key, "appsecretkey": self._app_secret, "grant_type": "client_credentials", "scope": "oob"})
-                if status != 200 or not body.get("access_token"):
-                    code = body.get("code") or body.get("rsp_cd")
-                    raise AuthError(status, code, f"NH 토큰 발급 실패({code}): {body.get('message') or body.get('rsp_msg') or ''}")
-                self._token = body["access_token"]
-                self._token_expires_at = time.time() + float(body.get("expires_in", 86400))
-                return self._token
+        return self._tokens.get()
+
+    def _issue_token(self) -> tuple[str, float]:
+        with self._usage.measure("auth"):
+            self._limiter.throttle.wait()
+            # SDK 규약: 파라미터는 쿼리스트링, 본문 없음, content-type 은 form-urlencoded
+            status, body = self._auth_http.request(
+                "POST", "/oauth2/token", headers={"Content-Type": "application/x-www-form-urlencoded"},
+                query={"appkey": self._app_key, "appsecretkey": self._app_secret, "grant_type": "client_credentials", "scope": "oob"})
+            if status != 200 or not body.get("access_token"):
+                code = str(body.get("code") or body.get("rsp_cd") or "")
+                msg = f"NH 토큰 발급 실패({code}): {body.get('message') or body.get('rsp_msg') or ''}"
+                if status == 429 or code.startswith("IGW429"):
+                    raise RateLimitError(status, code, msg, FAILURE_COOLDOWN_SECONDS)
+                raise AuthError(status, code or None, msg)
+            return body["access_token"], time.time() + float(body.get("expires_in", 86400))
 
 
 def _side_of(row: dict) -> OrderSide:

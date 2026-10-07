@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -35,9 +34,7 @@ type KbClient struct {
 	environment       TradingEnvironment
 	http              *http.Client
 	limiter           *rateLimiter
-	tokenMu           sync.Mutex
-	token             string
-	tokenExpires      time.Time
+	tokens            *tokenManager
 	call              func(path string, body map[string]any) (map[string]any, error)
 }
 
@@ -48,6 +45,7 @@ func NewKbClient(appKey, appSecret string) *KbClient {
 		http:    &http.Client{Timeout: 30 * time.Second},
 		limiter: newRateLimiter(100*time.Millisecond, 3, func(a int) time.Duration { return time.Duration(a) * time.Second }),
 	}
+	c.tokens = newTokenManager("kb", appKey, 5*time.Minute, c.issueToken)
 	c.call = c.request
 	return c
 }
@@ -413,14 +411,12 @@ func (c *KbClient) toOrder(row map[string]any) Order {
 }
 
 func (c *KbClient) request(path string, body map[string]any) (map[string]any, error) {
-	return c.limiter.execute("KB "+path, func() (map[string]any, error) { return c.requestOnce(path, body) })
+	return c.limiter.execute("KB "+path, func() (map[string]any, error) {
+		return c.tokens.call(func(token string) (map[string]any, error) { return c.requestOnce(path, body, token) })
+	})
 }
 
-func (c *KbClient) requestOnce(path string, body map[string]any) (map[string]any, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
+func (c *KbClient) requestOnce(path string, body map[string]any, token string) (map[string]any, error) {
 	payload, _ := json.Marshal(map[string]any{"dataHeader": map[string]any{"ipAddr": "", "macAddr": ""}, "dataBody": body})
 	status, parsed, resHeaders, err := httpJSONHeaders(c.http, "POST", c.baseURL+path, map[string]string{
 		"Content-Type": "application/json; charset=utf-8", "Authorization": "bearer " + token, "appKey": c.appKey,
@@ -465,12 +461,7 @@ func (c *KbClient) requestOnce(path string, body map[string]any) (map[string]any
 	return data, nil
 }
 
-func (c *KbClient) getToken() (_ string, err error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token != "" && time.Now().Before(c.tokenExpires.Add(-5*time.Minute)) {
-		return c.token, nil
-	}
+func (c *KbClient) issueToken() (_ string, _ time.Time, err error) {
 	defer c.usage().Measure("auth")(&err) // 실제 발급 경로만 센다 (캐시 히트는 제외)
 	c.limiter.throttle.wait()
 	payload, _ := json.Marshal(map[string]any{
@@ -479,22 +470,21 @@ func (c *KbClient) getToken() (_ string, err error) {
 	})
 	status, body, err := httpJSON(c.http, "POST", c.baseURL+"/oauth2/token", map[string]string{"Content-Type": "application/json; charset=utf-8"}, payload)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	data := obj(body, "dataBody")
 	token := str(data["access_token"])
 	if status != 200 || token == "" {
 		h := obj(body, "dataHeader")
-		msg := kbText(h["processMessage"])
-		if msg == "" {
-			msg = kbText(h["resultMessage"])
+		detail := kbText(h["processMessage"])
+		if detail == "" {
+			detail = kbText(h["resultMessage"])
 		}
-		return "", newAuthError(status, kbText(h["processCode"]), fmt.Sprintf("KB 토큰 발급 실패(%s): %s", kbText(h["resultCode"]), msg))
+		code, msg := kbText(h["processCode"]), fmt.Sprintf("KB 토큰 발급 실패(%s): %s", kbText(h["resultCode"]), detail)
+		if status == 429 {
+			return "", time.Time{}, newRateLimitErrorWithRetryAfter(status, code, msg, TokenFailureCooldown.Seconds())
+		}
+		return "", time.Time{}, newAuthError(status, code, msg)
 	}
-	c.token = token
-	c.tokenExpires = time.Now().Add(time.Duration(nhVal(data["expires_in"]).IntPart()) * time.Second)
-	if c.tokenExpires.Before(time.Now().Add(time.Minute)) {
-		c.tokenExpires = time.Now().Add(24 * time.Hour)
-	}
-	return c.token, nil
+	return token, tokenExpiresIn(data["expires_in"], 24*time.Hour), nil
 }

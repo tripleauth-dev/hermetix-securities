@@ -3,7 +3,7 @@ package hermetix
 // 한국투자증권(KIS) 모의투자 어댑터 (KRX). 실측 기반 (2026-08).
 //
 //   - 초당 요청 제한 -> 600ms 쓰로틀 + EGW00201 백오프 재시도
-//   - 토큰 발급 1분당 1회 제한 (토큰 24h 캐시)
+//   - 토큰 발급 1분당 1회 제한(초과 시 EGW00133 → RateLimitError). 토큰은 24h, 파일 캐시로 프로세스 간 재사용 (tokenManager)
 //   - 모의 서버는 미체결/체결 조회 미제공 -> 메모리 주문 추적, 체결은 보유수량 변화 근사
 //   - 취소는 지점번호 없이 ODNO 만으로 동작 / 캔들은 일봉만 / 지정가는 호가단위 보정
 
@@ -35,9 +35,7 @@ type KisClient struct {
 	environment                         TradingEnvironment
 	http                                *http.Client
 	limiter                             *rateLimiter
-	tokenMu                             sync.Mutex
-	token                               string
-	tokenExpires                        time.Time
+	tokens                              *tokenManager
 	trackedMu                           sync.Mutex
 	tracked                             map[string]kisTracked
 	call                                func(method, path, trID string, query, jsonBody map[string]string) (map[string]any, error)
@@ -58,6 +56,7 @@ func NewKisClient(appkey, appsecret, cano string) *KisClient {
 		limiter:     newRateLimiter(600*time.Millisecond, 3, func(attempt int) time.Duration { return time.Duration(attempt) * time.Second }),
 		tracked:     map[string]kisTracked{},
 	}
+	c.tokens = newTokenManager("kis", appkey, 5*time.Minute, c.issueToken)
 	c.call = c.request
 	return c
 }
@@ -571,15 +570,13 @@ func (c *KisClient) acct() map[string]string {
 
 func (c *KisClient) request(method, path, trID string, query, jsonBody map[string]string) (map[string]any, error) {
 	return c.limiter.execute("KIS "+trID, func() (map[string]any, error) {
-		return c.requestOnce(method, path, trID, query, jsonBody)
+		return c.tokens.call(func(token string) (map[string]any, error) {
+			return c.requestOnce(method, path, trID, token, query, jsonBody)
+		})
 	})
 }
 
-func (c *KisClient) requestOnce(method, path, trID string, query, jsonBody map[string]string) (map[string]any, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
+func (c *KisClient) requestOnce(method, path, trID, token string, query, jsonBody map[string]string) (map[string]any, error) {
 	rawURL := c.baseURL + path
 	if query != nil {
 		rawURL += "?" + encodeQuery(query)
@@ -606,7 +603,7 @@ func (c *KisClient) requestOnce(method, path, trID string, query, jsonBody map[s
 			return nil, newRateLimitError(status, code, msg)
 		case strings.Contains(msg, "장종료") || strings.Contains(msg, "장운영일이 아닙"):
 			return nil, newMarketClosedError(status, code, msg)
-		case status == 401:
+		case status == 401 || kisTokenRejectedCodes[code]:
 			return nil, newAuthError(status, code, msg)
 		default:
 			return nil, &BrokerAPIError{status, code, msg}
@@ -615,12 +612,12 @@ func (c *KisClient) requestOnce(method, path, trID string, query, jsonBody map[s
 	return body, nil
 }
 
-func (c *KisClient) getToken() (_ string, err error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token != "" && time.Now().Before(c.tokenExpires.Add(-5*time.Minute)) {
-		return c.token, nil
-	}
+// kisTokenRejectedCodes - 업무 호출이 토큰을 거부. EGW00121 유효하지 않은 token, EGW00123 기간이 만료된 token (HTTP 500 으로 온다)
+var kisTokenRejectedCodes = map[string]bool{"EGW00121": true, "EGW00123": true}
+
+func (c *KisClient) getToken() (string, error) { return c.tokens.get() }
+
+func (c *KisClient) issueToken() (_ string, _ time.Time, err error) {
 	defer c.usage().Measure("auth")(&err) // 실제 발급 경로만 센다 (캐시 히트는 제외)
 	c.limiter.throttle.wait()
 	payload, _ := json.Marshal(map[string]string{
@@ -629,14 +626,16 @@ func (c *KisClient) getToken() (_ string, err error) {
 	status, body, err := httpJSON(c.http, "POST", c.baseURL+"/oauth2/tokenP",
 		map[string]string{"Content-Type": "application/json"}, payload)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	token := str(body["access_token"])
 	if status != 200 || token == "" {
-		return "", newAuthError(status, str(body["error_code"]),
-			"KIS 토큰 발급 실패: "+str(body["error_description"])+" (발급은 1분당 1회 제한)")
+		code, detail := str(body["error_code"]), str(body["error_description"])
+		if code == "EGW00133" || status == 429 {
+			return "", time.Time{}, newRateLimitErrorWithRetryAfter(status, code,
+				fmt.Sprintf("KIS 토큰 발급 유량 초과(%s): %s (발급은 1분당 1회 제한)", code, detail), TokenFailureCooldown.Seconds())
+		}
+		return "", time.Time{}, newAuthError(status, code, fmt.Sprintf("KIS 토큰 발급 실패(%s): %s", code, detail))
 	}
-	c.token = token
-	c.tokenExpires = time.Now().Add(time.Duration(d(body["expires_in"]).IntPart()) * time.Second)
-	return c.token, nil
+	return token, tokenExpiresIn(body["expires_in"], 24*time.Hour), nil
 }

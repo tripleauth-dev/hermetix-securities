@@ -11,10 +11,6 @@
  * - 앱 20 TPS 이지만 잔고·체결 2 TPS, 예수금 1 TPS → 500ms 쓰로틀 + IGW00201 지수 백오프
  * 미확인(실측 필요): 응답 숫자의 JSON 타입, IsuNo 의 A 접두 여부, 일봉 정렬(최신일 우선 추정), PrdyVrss 부호 여부
  */
-import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { instrumentBroker, type BrokerUsage } from "../telemetry.js";
 import { Decimal } from "decimal.js";
 import { MarketStream, RateLimiter, StreamingBrokerClient, httpJson, krxCalendar, krxTickRound } from "../broker.js";
@@ -26,6 +22,7 @@ import type {
   Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, Quote, TradingEnvironment,
 } from "../models.js";
 import { symbolCodeFor } from "../models.js";
+import { FAILURE_COOLDOWN_SECONDS, TokenManager } from "../tokens.js";
 import { DbMarketStream } from "./dbStream.js";
 
 const AUTH_CODES = new Set(["IGW00121", "IGW00122", "IGW00123", "IGW40342"]);
@@ -34,44 +31,8 @@ const INSUFFICIENT_CODES = new Set(["1584", "2714", "2752", "M100"]);
 const INVALID_ORDER_CODES = new Set(["2706", "3180", "3181"]);
 const ORDER_NOT_FOUND_CODES = new Set(["3056", "3416"]);
 
-/** 토큰 발급은 1분 1건 (초과 시 HTTP 403 + IGW00201). 발급에 실패하면 이 시간 동안 서버에 다시 묻지 않는다 */
-export const TOKEN_FAILURE_COOLDOWN_SECONDS = 60;
-/** 토큰 만료 전 미리 갱신하는 여유 */
-const TOKEN_REFRESH_MARGIN_MS = 600_000;
-
-/**
- * 발급 토큰 파일 캐시 위치 — 같은 키를 쓰는 여러 프로세스가 24시간 토큰을 나눠 쓴다 (공식 SDK 의 .dbsec_token.json 과 같은 목적).
- * 파일에는 토큰과 만료 시각만 담고 키는 담지 않는다. null 이면 파일 캐시를 쓰지 않는다 (테스트)
- */
-let tokenCacheDir: string | null = (() => { try { return join(homedir(), ".hermetix", "tokens"); } catch { return null; } })();
-export function __setDbTokenCacheDirForTests(dir: string | null): void { tokenCacheDir = dir; }
-
-function tokenCachePath(appKey: string): string | null {
-  return tokenCacheDir === null ? null : join(tokenCacheDir, `db-${createHash("sha256").update(appKey).digest("hex").slice(0, 16)}.json`);
-}
-
-function loadCachedToken(appKey: string): { token: string; expiresAt: number } | null {
-  const path = tokenCachePath(appKey);
-  if (path === null) return null;
-  try {
-    const data = JSON.parse(readFileSync(path, "utf8")) as { access_token?: unknown; expires_at?: unknown };
-    const expiresAt = Number(data.expires_at) * 1000;
-    return typeof data.access_token === "string" && data.access_token && expiresAt - TOKEN_REFRESH_MARGIN_MS > Date.now()
-      ? { token: data.access_token, expiresAt } : null;
-  } catch { return null; }
-}
-
-function saveCachedToken(appKey: string, token: string, expiresAt: number): void {
-  const path = tokenCachePath(appKey);
-  if (path === null) return;
-  try {
-    mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ access_token: token, expires_at: expiresAt / 1000 }), { mode: 0o600 });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, path);
-  } catch { /* 캐시 저장 실패는 이번 호출에 영향을 주지 않는다 */ }
-}
+/** 토큰 발급은 1분 1건 (초과 시 HTTP 403 + IGW00201) — 쿨다운·파일 캐시는 TokenManager */
+const TOKEN_REFRESH_MARGIN_SECONDS = 600;
 
 const num = (v: unknown): Decimal | null => {
   if (v === null || v === undefined) return null;
@@ -113,12 +74,7 @@ export class DbClient implements StreamingBrokerClient {
   };
 
   readonly wsUrl: string;
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
-  /** 진행 중인 발급 — 동시 호출이 발급을 한 번만 하게 한다 */
-  private tokenIssuing: Promise<string> | null = null;
-  /** 마지막 발급 실패 (쿨다운 종료 시각 ms, 오류) — 쿨다운 동안은 서버에 묻지 않고 같은 오류를 돌려준다 */
-  private tokenFailure: { until: number; error: BrokerApiError } | null = null;
+  private readonly tokens: TokenManager;
   private readonly limiter: RateLimiter;
 
   /** 운영/모의는 같은 호스트 — 모의투자용 키로만 분기된다. environment 는 엔진의 실전 게이트용 선언이다 */
@@ -134,7 +90,8 @@ export class DbClient implements StreamingBrokerClient {
   ) {
     this.limiter = new RateLimiter(throttleMs, 4, (attempt) => 1000 * 2 ** (attempt - 1));
     this.wsUrl = wsUrl || (environment === "LIVE" ? DbClient.LIVE_WS_URL : DbClient.PAPER_WS_URL);
-      this.usage = instrumentBroker(this);
+    this.tokens = new TokenManager("db", appKey, () => this.issueToken(), TOKEN_REFRESH_MARGIN_SECONDS);
+    this.usage = instrumentBroker(this);
   }
 
   /** 웹소켓은 REST 접근토큰을 매 메시지 헤더에 싣는다 (문서 기반, 실측 전) */
@@ -289,12 +246,12 @@ export class DbClient implements StreamingBrokerClient {
   }
 
   private call(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.limiter.execute(() => this.callOnce(path, body), `DB ${path}`);
+    return this.limiter.execute(() => this.tokens.call((token) => this.callOnce(path, body, token)), `DB ${path}`);
   }
 
-  private async callOnce(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async callOnce(path: string, body: Record<string, unknown>, token: string): Promise<Record<string, unknown>> {
     const headers: Record<string, string> = {
-      "Content-Type": "application/json; charset=utf-8", authorization: `Bearer ${await this.getToken()}`, cont_yn: "N", cont_key: "",
+      "Content-Type": "application/json; charset=utf-8", authorization: `Bearer ${token}`, cont_yn: "N", cont_key: "",
     };
     if (this.macAddress) headers.mac_address = this.macAddress;
     const [status, parsed, resHeaders] = await httpJson(this.baseUrl + path, { method: "POST", headers, body: JSON.stringify({ In: body }) });
@@ -314,33 +271,12 @@ export class DbClient implements StreamingBrokerClient {
     return parsed;
   }
 
-  private async getToken(): Promise<string> {
-    if (this.token && Date.now() < this.tokenExpiresAt - TOKEN_REFRESH_MARGIN_MS) return this.token;
-    const cached = loadCachedToken(this.appKey);
-    if (cached) {
-      this.token = cached.token;
-      this.tokenExpiresAt = cached.expiresAt;
-      return cached.token;
-    }
-    if (this.tokenFailure && Date.now() < this.tokenFailure.until) {
-      throw cooldownError(this.tokenFailure.error, (this.tokenFailure.until - Date.now()) / 1000);
-    }
-    this.tokenIssuing ??= this.issueToken().finally(() => { this.tokenIssuing = null; });
-    return this.tokenIssuing;
+  private getToken(): Promise<string> {
+    return this.tokens.get();
   }
 
-  private async issueToken(): Promise<string> {
-    try {
-      const { token, expiresAt } = await this.usage.measure("auth", () => this.requestToken());
-      this.tokenFailure = null;
-      this.token = token;
-      this.tokenExpiresAt = expiresAt;
-      saveCachedToken(this.appKey, token, expiresAt);
-      return token;
-    } catch (e) {
-      if (e instanceof BrokerApiError) this.tokenFailure = { until: Date.now() + TOKEN_FAILURE_COOLDOWN_SECONDS * 1000, error: e };
-      throw e;
-    }
+  private issueToken(): Promise<{ token: string; expiresAt: number }> {
+    return this.usage.measure("auth", () => this.requestToken());
   }
 
   private async requestToken(): Promise<{ token: string; expiresAt: number }> {
@@ -353,17 +289,10 @@ export class DbClient implements StreamingBrokerClient {
       const code = String(body.rsp_cd ?? body.error ?? "");
       const detail = String(body.rsp_msg ?? body.error_description ?? "");
       if (code === "IGW00201" || status === 429) {
-        throw new RateLimitError(status, code || null, `DB 토큰 발급 유량 초과(${code}): ${detail} (발급은 1분당 1회 제한)`, TOKEN_FAILURE_COOLDOWN_SECONDS);
+        throw new RateLimitError(status, code || null, `DB 토큰 발급 유량 초과(${code}): ${detail} (발급은 1분당 1회 제한)`, FAILURE_COOLDOWN_SECONDS);
       }
       throw new AuthError(status, code || null, `DB 토큰 발급 실패(${code}): ${detail}`);
     }
     return { token: body.access_token, expiresAt: Date.now() + Number(body.expires_in ?? 86400) * 1000 };
   }
-}
-
-/** 쿨다운 중 재요청 — 서버에 묻지 않고 같은 종류의 오류를 남은 시간과 함께 돌려준다 */
-function cooldownError(failure: BrokerApiError, remainingSeconds: number): BrokerApiError {
-  return failure instanceof RateLimitError
-    ? new RateLimitError(failure.httpStatus, failure.errorCode, failure.message, remainingSeconds)
-    : failure;
 }

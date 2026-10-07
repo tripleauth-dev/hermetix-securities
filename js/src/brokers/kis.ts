@@ -2,7 +2,7 @@
  * 한국투자증권(KIS) 모의투자 어댑터 (KRX). 실측 기반 (2026-08).
  *
  * - 초당 요청 제한 -> 600ms 쓰로틀 + EGW00201 백오프 재시도
- * - 토큰 발급 1분당 1회 제한 (토큰 24h 캐시)
+ * - 토큰 발급 1분당 1회 제한(초과 시 EGW00133 → RateLimitError). 토큰은 24h, 파일 캐시로 프로세스 간 재사용 (TokenManager)
  * - 모의 서버는 미체결/체결 조회 미제공 -> 메모리 주문 추적, 체결은 보유수량 변화 근사
  * - 취소는 지점번호 없이 ODNO 만으로 동작 / 캔들은 일봉만 / 지정가는 호가단위 보정
  */
@@ -14,6 +14,7 @@ import {
 import type { MarketStream, StreamingBrokerClient } from "../broker.js";
 import { KisMarketStream } from "./kisStream.js";
 import { AuthError, BrokerApiError, MarketClosedError, RateLimitError } from "../errors.js";
+import { FAILURE_COOLDOWN_SECONDS, TokenManager } from "../tokens.js";
 import type {
   Account, BrokerCapabilities, Candle, CandleInterval, CreateOrderRequest,
   Fill, Holding, MarketDay, Order, OrderEvent, Quote,
@@ -21,6 +22,9 @@ import type {
 } from "../models.js";
 import { orderIdMatches, symbolCodeFor } from "../models.js";
 import { isOpenStatus } from "../models.js";
+
+/** 업무 호출이 토큰을 거부 — EGW00121 유효하지 않은 token, EGW00123 기간이 만료된 token (HTTP 500 으로 온다) */
+const TOKEN_REJECTED_CODES = new Set(["EGW00121", "EGW00123"]);
 
 interface Tracked { order: Order; baselineQty: Decimal; day: string; }
 
@@ -41,8 +45,7 @@ export class KisClient implements StreamingBrokerClient {
     streams: new Set(["TRADES", "ORDER_BOOK", "ORDER_EVENTS"]),
   };
 
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+  private readonly tokens: TokenManager;
   /** 초당 요청 제한 — 쓰로틀 + EGW00201 백오프 재시도 */
   private readonly limiter: RateLimiter;
   private readonly tracked = new Map<string, Tracked>();
@@ -75,7 +78,8 @@ export class KisClient implements StreamingBrokerClient {
     this.baseUrl = baseUrl || (live ? KisClient.LIVE_URL : KisClient.PAPER_URL);
     this.wsUrl = wsUrl || (live ? KisClient.LIVE_WS_URL : KisClient.PAPER_WS_URL);
     this.limiter = new RateLimiter(throttleMs || (live ? 100 : 600), 3, (attempt) => 1000 * attempt);
-      this.usage = instrumentBroker(this);
+    this.tokens = new TokenManager("kis", appkey, () => this.issueToken(), 300);
+    this.usage = instrumentBroker(this);
   }
 
   /** 계좌 TR ID — 모의 V, 실전 T 프리픽스 (예: tr("TTC0802U") → VTTC0802U / TTTC0802U) */
@@ -328,11 +332,11 @@ export class KisClient implements StreamingBrokerClient {
     method: string, path: string, trId: string,
     opts: { query?: Record<string, string>; json?: Record<string, string> } = {},
   ): Promise<Record<string, unknown>> {
-    return this.limiter.execute(() => this.callOnce(method, path, trId, opts), `KIS ${trId}`);
+    return this.limiter.execute(() => this.tokens.call((token) => this.callOnce(method, path, trId, token, opts)), `KIS ${trId}`);
   }
 
   private async callOnce(
-    method: string, path: string, trId: string,
+    method: string, path: string, trId: string, token: string,
     opts: { query?: Record<string, string>; json?: Record<string, string> },
   ): Promise<Record<string, unknown>> {
     let url = this.baseUrl + path;
@@ -341,7 +345,7 @@ export class KisClient implements StreamingBrokerClient {
       method,
       headers: {
         "Content-Type": "application/json; charset=utf-8",
-        authorization: `Bearer ${await this.getToken()}`,
+        authorization: `Bearer ${token}`,
         appkey: this.appkey, appsecret: this.appsecret, tr_id: trId, custtype: "P",
       },
       body: opts.json ? JSON.stringify(opts.json) : undefined,
@@ -351,28 +355,29 @@ export class KisClient implements StreamingBrokerClient {
       const msg = `KIS(${trId}) ${body.msg1 ?? ""}`.trim();
       if (code === "EGW00201") throw new RateLimitError(status, code, msg);
       if (msg.includes("장종료") || msg.includes("장운영일이 아닙")) throw new MarketClosedError(status, code, msg);
-      if (status === 401) throw new AuthError(status, code, msg);
+      if (status === 401 || (code !== null && TOKEN_REJECTED_CODES.has(code))) throw new AuthError(status, code, msg);
       throw new BrokerApiError(status, code, msg);
     }
     return body;
   }
 
-  private async getToken(): Promise<string> {
+  private issueToken(): Promise<{ token: string; expiresAt: number }> {
     return this.usage.measure("auth", async () => {
-    if (this.token && Date.now() < this.tokenExpiresAt - 300_000) return this.token;
-    await this.limiter.throttle.wait();
-    const [status, body] = await httpJson(`${this.baseUrl}/oauth2/tokenP`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ grant_type: "client_credentials", appkey: this.appkey, appsecret: this.appsecret }),
-    });
-    if (status !== 200 || typeof body.access_token !== "string") {
-      throw new AuthError(status, (body.error_code as string) ?? null,
-        `KIS 토큰 발급 실패: ${body.error_description ?? ""} (발급은 1분당 1회 제한)`);
-    }
-    this.token = body.access_token;
-    this.tokenExpiresAt = Date.now() + Number(body.expires_in ?? 86400) * 1000;
-    return this.token;
+      await this.limiter.throttle.wait();
+      const [status, body] = await httpJson(`${this.baseUrl}/oauth2/tokenP`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grant_type: "client_credentials", appkey: this.appkey, appsecret: this.appsecret }),
+      });
+      if (status !== 200 || typeof body.access_token !== "string") {
+        const code = (body.error_code as string) ?? null;
+        const detail = body.error_description ?? "";
+        if (code === "EGW00133" || status === 429) {
+          throw new RateLimitError(status, code, `KIS 토큰 발급 유량 초과(${code}): ${detail} (발급은 1분당 1회 제한)`, FAILURE_COOLDOWN_SECONDS);
+        }
+        throw new AuthError(status, code, `KIS 토큰 발급 실패(${code}): ${detail}`);
+      }
+      return { token: body.access_token, expiresAt: Date.now() + Number(body.expires_in ?? 86400) * 1000 };
     });
   }
 }

@@ -7,25 +7,19 @@ package hermetix
 //   - 모든 API 는 POST, 본문 {"In": {...}}, 응답 rsp_cd/rsp_msg + Out(객체 또는 배열) / Out1. TR 코드는 문서용, 경로로 식별
 //   - 헤더 authorization: Bearer + cont_yn/cont_key (+ 법인만 mac_address). appkey 헤더 없음
 //   - 토큰 POST /oauth2/token 은 form-urlencoded(appsecretkey), 24h, 발급 1분 1건(초과 시 403 + IGW00201 → RateLimitError).
-//     발급 토큰은 ~/.hermetix/tokens/db-<키 해시>.json 에 저장해 프로세스 간 재사용하고, 발급 실패 후 60초는 서버에 다시 묻지 않는다
+//     발급 토큰은 ~/.hermetix/tokens/db-<키 해시>.json 에 저장해 프로세스 간 재사용하고, 발급 실패 후 60초는 서버에 다시 묻지 않는다 (tokenManager)
 //   - 운영/모의 같은 호스트 — 모의 키로만 분기. HTTP 200 + rsp_cd != 00000 이 업무 오류(이때 Out 없음)
 //   - 앱 20 TPS 이지만 잔고·체결 2 TPS, 예수금 1 TPS → 500ms 쓰로틀 + IGW00201 지수 백오프
 //
 // 미확인(실측 필요): 응답 숫자의 JSON 타입, IsuNo 의 A 접두 여부, 일봉 정렬(최신일 우선 추정), PrdyVrss 부호 여부
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -51,13 +45,8 @@ type DbClient struct {
 	environment       TradingEnvironment
 	http              *http.Client
 	limiter           *rateLimiter
-	tokenMu           sync.Mutex
-	token             string
-	tokenExpires      time.Time
-	// 마지막 발급 실패 — 쿨다운(tokenFailUntil) 동안은 서버에 묻지 않고 같은 오류를 돌려준다
-	tokenFailUntil time.Time
-	tokenFailErr   error
-	call           func(path string, body map[string]any) (map[string]any, error)
+	tokens            *tokenManager
+	call              func(path string, body map[string]any) (map[string]any, error)
 }
 
 // NewDbClient - 운영/모의는 같은 호스트, 모의투자용 키로만 분기된다. SetEnvironment 는 엔진의 실전 게이트용 선언이다.
@@ -67,6 +56,7 @@ func NewDbClient(appKey, appSecret string) *DbClient {
 		http:    &http.Client{Timeout: 30 * time.Second},
 		limiter: newRateLimiter(500*time.Millisecond, 4, func(a int) time.Duration { return time.Duration(1<<(a-1)) * time.Second }),
 	}
+	c.tokens = newTokenManager("db", appKey, dbTokenRefreshMargin, c.issueToken)
 	c.call = c.request
 	return c
 }
@@ -436,14 +426,12 @@ func (c *DbClient) toOrder(row map[string]any) Order {
 }
 
 func (c *DbClient) request(path string, body map[string]any) (map[string]any, error) {
-	return c.limiter.execute("DB "+path, func() (map[string]any, error) { return c.requestOnce(path, body) })
+	return c.limiter.execute("DB "+path, func() (map[string]any, error) {
+		return c.tokens.call(func(token string) (map[string]any, error) { return c.requestOnce(path, body, token) })
+	})
 }
 
-func (c *DbClient) requestOnce(path string, body map[string]any) (map[string]any, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
+func (c *DbClient) requestOnce(path string, body map[string]any, token string) (map[string]any, error) {
 	headers := map[string]string{
 		"Content-Type": "application/json; charset=utf-8", "authorization": "Bearer " + token, "cont_yn": "N", "cont_key": "",
 	}
@@ -480,34 +468,7 @@ func (c *DbClient) requestOnce(path string, body map[string]any) (map[string]any
 	return parsed, nil
 }
 
-func (c *DbClient) getToken() (string, error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	now := dbNow()
-	if c.token != "" && now.Before(c.tokenExpires.Add(-dbTokenRefreshMargin)) {
-		return c.token, nil
-	}
-	if token, expires, ok := loadDbCachedToken(c.appKey, now); ok {
-		c.token, c.tokenExpires = token, expires
-		return token, nil
-	}
-	if c.tokenFailErr != nil && now.Before(c.tokenFailUntil) {
-		return "", dbCooldownError(c.tokenFailErr, c.tokenFailUntil.Sub(now))
-	}
-	token, expires, err := c.issueToken()
-	if err != nil {
-		var authErr *AuthError
-		var rateLimited *RateLimitError
-		if errors.As(err, &authErr) || errors.As(err, &rateLimited) { // 네트워크 오류는 쿨다운 없이 다음 호출에서 다시 시도
-			c.tokenFailUntil, c.tokenFailErr = dbNow().Add(DbTokenFailureCooldown), err
-		}
-		return "", err
-	}
-	c.tokenFailErr = nil
-	c.token, c.tokenExpires = token, expires
-	saveDbCachedToken(c.appKey, token, expires)
-	return token, nil
-}
+func (c *DbClient) getToken() (string, error) { return c.tokens.get() }
 
 func (c *DbClient) issueToken() (_ string, _ time.Time, err error) {
 	defer c.usage().Measure("auth")(&err) // 실제 발급 경로만 센다 (캐시 히트는 제외)
@@ -527,92 +488,12 @@ func (c *DbClient) issueToken() (_ string, _ time.Time, err error) {
 		detail := str(body["rsp_msg"]) + str(body["error_description"])
 		if code == "IGW00201" || status == 429 {
 			return "", time.Time{}, newRateLimitErrorWithRetryAfter(status, code,
-				fmt.Sprintf("DB 토큰 발급 유량 초과(%s): %s (발급은 1분당 1회 제한)", code, detail), DbTokenFailureCooldown.Seconds())
+				fmt.Sprintf("DB 토큰 발급 유량 초과(%s): %s (발급은 1분당 1회 제한)", code, detail), TokenFailureCooldown.Seconds())
 		}
 		return "", time.Time{}, newAuthError(status, code, fmt.Sprintf("DB 토큰 발급 실패(%s): %s", code, detail))
 	}
-	expires := dbNow().Add(time.Duration(nhVal(body["expires_in"]).IntPart()) * time.Second)
-	if expires.Before(dbNow().Add(time.Minute)) {
-		expires = dbNow().Add(24 * time.Hour)
-	}
-	return token, expires, nil
+	return token, tokenExpiresIn(body["expires_in"], 24*time.Hour), nil
 }
 
-// DbTokenFailureCooldown - 토큰 발급은 1분 1건 (초과 시 HTTP 403 + IGW00201). 발급에 실패하면 이 시간 동안 서버에 다시 묻지 않는다
-const DbTokenFailureCooldown = 60 * time.Second
-
-// dbTokenRefreshMargin - 토큰 만료 전 미리 갱신하는 여유
+// dbTokenRefreshMargin - 토큰 만료 전 미리 갱신하는 여유. 발급 1분 1건(초과 시 403 + IGW00201) — 쿨다운·파일 캐시는 tokenManager
 const dbTokenRefreshMargin = 10 * time.Minute
-
-// dbNow - 토큰 수명 계산용 시계 (테스트에서 교체한다)
-var dbNow = time.Now
-
-// dbTokenCacheDir - 발급 토큰 파일 캐시 위치. 같은 키를 쓰는 여러 프로세스가 24시간 토큰을 나눠 쓴다
-// (공식 SDK 의 .dbsec_token.json 과 같은 목적). 파일에는 토큰과 만료 시각만 담고 키는 담지 않는다. 빈 문자열이면 쓰지 않는다 (테스트)
-var dbTokenCacheDir = func() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".hermetix", "tokens")
-}()
-
-type dbCachedToken struct {
-	AccessToken string  `json:"access_token"`
-	ExpiresAt   float64 `json:"expires_at"`
-}
-
-func dbTokenCachePath(appKey string) string {
-	if dbTokenCacheDir == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(appKey))
-	return filepath.Join(dbTokenCacheDir, "db-"+hex.EncodeToString(sum[:])[:16]+".json")
-}
-
-func loadDbCachedToken(appKey string, now time.Time) (string, time.Time, bool) {
-	path := dbTokenCachePath(appKey)
-	if path == "" {
-		return "", time.Time{}, false
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", time.Time{}, false
-	}
-	var cached dbCachedToken
-	if json.Unmarshal(raw, &cached) != nil || cached.AccessToken == "" {
-		return "", time.Time{}, false
-	}
-	expires := time.Unix(0, int64(cached.ExpiresAt*float64(time.Second)))
-	if !now.Before(expires.Add(-dbTokenRefreshMargin)) {
-		return "", time.Time{}, false
-	}
-	return cached.AccessToken, expires, true
-}
-
-// saveDbCachedToken - 실패해도 이번 호출에는 영향을 주지 않는다
-func saveDbCachedToken(appKey, token string, expires time.Time) {
-	path := dbTokenCachePath(appKey)
-	if path == "" {
-		return
-	}
-	raw, err := json.Marshal(dbCachedToken{AccessToken: token, ExpiresAt: float64(expires.UnixNano()) / float64(time.Second)})
-	if err != nil || os.MkdirAll(filepath.Dir(path), 0o700) != nil {
-		return
-	}
-	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
-	if os.WriteFile(tmp, raw, 0o600) != nil {
-		return
-	}
-	_ = os.Chmod(tmp, 0o600)
-	_ = os.Rename(tmp, path)
-}
-
-// dbCooldownError - 쿨다운 중 재요청. 서버에 묻지 않고 같은 종류의 오류를 남은 시간과 함께 돌려준다
-func dbCooldownError(failure error, remaining time.Duration) error {
-	var rateLimited *RateLimitError
-	if errors.As(failure, &rateLimited) {
-		return newRateLimitErrorWithRetryAfter(rateLimited.HTTPStatus, rateLimited.Code, rateLimited.Message, remaining.Seconds())
-	}
-	return failure
-}

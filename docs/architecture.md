@@ -56,14 +56,17 @@ jitpack.yml        <- JitPack 이 kotlin/ 에서 빌드하도록 지정
 
 ```
 getToken()
- ├─ 캐시 토큰이 있고 만료까지 margin(기본 60초) 이상 남음 → 그대로 반환
- └─ 아니면 @Synchronized refresh()
-      └─ POST /v1/oauth/token (client_credentials) → 캐시 갱신
+ ├─ 메모리 토큰이 있고 만료까지 margin(넥스트·토스 60초, 그 외 300~600초) 이상 남음 → 그대로 반환
+ └─ 아니면 잠금 안에서
+      ├─ 파일 캐시(~/.hermetix/tokens)에 다른 프로세스가 저장한 유효 토큰 → 그대로 반환
+      ├─ 마지막 발급 실패 후 60초 안 → 같은 오류 (서버에 묻지 않음)
+      └─ 발급 (넥스트: POST /v1/oauth/token client_credentials) → 메모리·파일 갱신
 ```
 
 - `NextApiClient` 는 모든 인증 호출을 `executeWithRetry` 로 감싼다: 401(또는 `type=authentication`) 응답이면 `invalidate()` 후 **정확히 1회** 재발급-재시도. 재시도도 실패하면 예외 전파
 - 토큰 유효기간은 공개 스펙 v1.3 기준 12시간(`expires_in=43200`), refresh 토큰 없음. 어댑터는 응답의 `expires_in` 을 그대로 신뢰한다
-- 토큰 발급 API 만 에러 형식이 다르다 — 400/401 은 OAuth 표준 `{error, error_description}`, 429/5xx 는 플랫폼 엔벨로프. `TokenManager` 가 둘 다 `AuthError` 로 변환한다
+- 토큰 발급 API 만 에러 형식이 다르다 — 400/401 은 OAuth 표준 `{error, error_description}`, 429/5xx 는 플랫폼 엔벨로프. 429 는 `RateLimitError`(Retry-After), 그 외는 `AuthError` 로 변환한다
+- 여덟 어댑터가 같은 `TokenManager` 를 쓴다 — 파일 캐시·발급 실패 60초 쿨다운·거부 토큰 폐기 후 1회 재시도 ([brokers.md](brokers.md) 토큰 수명주기)
 
 ### 넥스트증권 공통 헤더 (공개 스펙 v1.3)
 
@@ -181,7 +184,7 @@ tick(strategy):
 | 상태 | 위치 | 재시작 시 |
 |---|---|---|
 | 보유 포지션, 미체결 주문, 체결 내역, 평균단가 | **서버** | 유지 (API 로 재조회) |
-| 액세스 토큰 | 메모리 (TokenManager) | 재발급 (자동) |
+| 액세스 토큰 | 메모리 + 파일 캐시 `~/.hermetix/tokens` (TokenManager) | 파일 캐시 재사용, 없거나 만료면 재발급 (자동) |
 | 웹소켓 구독 목록, 마지막 체결 틱 | 메모리 (MarketStream / StrategyEngine.latestTrades) | 재구독 (자동) — 재접속 전 틱은 폴링이 메운다 |
 | 시장 캘린더 | 메모리 캐시 (6h TTL) | 재조회 (자동) |
 | 브라켓 (익절/손절 예약) | 메모리 (BracketMonitor) | **소실** |
@@ -195,7 +198,7 @@ tick(strategy):
 
 ```
 BrokerApiException (기반)
- |- AuthError               -> 어댑터가 토큰 재발급 후 재시도 (넥스트), 소진 시 틱 실패
+ |- AuthError               -> 어댑터가 토큰을 버리고 1회 재발급 후 재시도 (전 증권사), 소진 시 틱 실패
  |- RateLimitError          -> 어댑터가 백오프 재시도, 소진 시 틱 스킵 (비상정지 카운트 제외)
  |- MarketClosedError       -> 틱 조용히 스킵 (비상정지 카운트 제외 - KRX 합성 캘린더의 공휴일 케이스 포함)
  |- InsufficientFundsError  -> 해당 시그널만 스킵

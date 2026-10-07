@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import threading
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -22,6 +21,7 @@ from ..models import (
     Account, BrokerCapabilities, Candle, CandleInterval, CreateOrderRequest,
     Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, OrderType, Quote, StreamChannel,
 )
+from ..tokens import FAILURE_COOLDOWN_SECONDS, TokenManager
 from .kiwoom_stream import KiwoomMarketStream
 
 
@@ -80,9 +80,7 @@ class KiwoomClient(StreamingBrokerClient):
         self._http = _Http(base_url or (self.LIVE_URL if environment == TradingEnvironment.LIVE else self.PAPER_URL))
         # TR 당 초당 1회 유량 제한 - 쓰로틀 + 백오프 재시도
         self._limiter = RateLimiter(throttle_seconds, max_retries=3, backoff=lambda attempt: 1.1 * attempt)
-        self._token: str | None = None
-        self._token_expires_at = 0.0
-        self._token_lock = threading.Lock()
+        self._tokens = TokenManager("kiwoom", appkey, self._issue_token, 300)
 
     # ------------------------------------------------------------------ market
 
@@ -248,12 +246,13 @@ class KiwoomClient(StreamingBrokerClient):
         return self._call("/api/dostk/acnt", "kt00018", {"qry_tp": "1", "dmst_stex_tp": "KRX"})
 
     def _call(self, path: str, api_id: str, body: dict) -> dict:
-        return self._limiter.execute(lambda: self._call_once(path, api_id, body), f"키움 {api_id}")
+        return self._limiter.execute(lambda: self._tokens.call(lambda token: self._call_once(path, api_id, body, token)),
+                                     f"키움 {api_id}")
 
-    def _call_once(self, path: str, api_id: str, body: dict) -> dict:
+    def _call_once(self, path: str, api_id: str, body: dict, token: str) -> dict:
         status, parsed = self._http.request(
             "POST", path,
-            headers={"authorization": f"Bearer {self._get_token()}", "api-id": api_id},
+            headers={"authorization": f"Bearer {token}", "api-id": api_id},
             json_body=body)
 
         if status < 200 or status >= 300 or parsed.get("return_code") != 0:
@@ -263,7 +262,7 @@ class KiwoomClient(StreamingBrokerClient):
                 raise RateLimitError(status, code, msg)
             if "장종료" in msg or "RC4058" in msg:
                 raise MarketClosedError(status, code, msg)
-            if status == 401:
+            if status == 401 or "8005" in msg:  # 8005: Token이 유효하지 않습니다
                 raise AuthError(status, code, msg)
             raise BrokerApiError(status, code, msg)
         return parsed
@@ -275,25 +274,24 @@ class KiwoomClient(StreamingBrokerClient):
         return KiwoomMarketStream(self._ws_url, self._get_token, usage=self._usage)
 
     def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 300:
-            return self._token
-        with self._token_lock:
-            if self._token and time.time() < self._token_expires_at - 300:
-                return self._token
-            with self._usage.measure("auth"):
-                self._limiter.throttle.wait()
-                status, body = self._http.request(
-                    "POST", "/oauth2/token",
-                    json_body={"grant_type": "client_credentials",
-                               "appkey": self._appkey, "secretkey": self._secretkey})
-                if status != 200 or body.get("return_code") != 0 or not body.get("token"):
-                    raise AuthError(status, str(body.get("return_code")),
-                                    f"키움 토큰 발급 실패: {body.get('return_msg', '')}")
-                self._token = body["token"]
-                # expires_dt: yyyyMMddHHmmss (KST)
-                try:
-                    expires = datetime.strptime(body["expires_dt"], "%Y%m%d%H%M%S").replace(tzinfo=KST)
-                    self._token_expires_at = expires.timestamp()
-                except (KeyError, ValueError):
-                    self._token_expires_at = time.time() + 86400
-                return self._token
+        return self._tokens.get()
+
+    def _issue_token(self) -> tuple[str, float]:
+        with self._usage.measure("auth"):
+            self._limiter.throttle.wait()
+            status, body = self._http.request(
+                "POST", "/oauth2/token",
+                json_body={"grant_type": "client_credentials",
+                           "appkey": self._appkey, "secretkey": self._secretkey})
+            if status != 200 or body.get("return_code") != 0 or not body.get("token"):
+                code = str(body.get("return_code"))
+                msg = f"키움 토큰 발급 실패: {body.get('return_msg', '')}"
+                if status == 429 or "요청 개수를 초과" in msg:
+                    raise RateLimitError(status, code, msg, FAILURE_COOLDOWN_SECONDS)
+                raise AuthError(status, code, msg)
+            # expires_dt: yyyyMMddHHmmss (KST)
+            try:
+                expires_at = datetime.strptime(body["expires_dt"], "%Y%m%d%H%M%S").replace(tzinfo=KST).timestamp()
+            except (KeyError, ValueError):
+                expires_at = time.time() + 86400
+            return body["token"], expires_at

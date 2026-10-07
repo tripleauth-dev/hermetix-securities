@@ -63,12 +63,12 @@ func newDbTokenServer(t *testing.T, replies ...dbReply) *dbTokenServer {
 	return s
 }
 
-// withDbClock - dbNow 를 고정 시계로 바꾸고, 클라이언트의 레이트리미터 대기가 시계를 앞으로 돌리게 한다
+// withDbClock - tokenNow 를 고정 시계로 바꾸고, 클라이언트의 레이트리미터 대기가 시계를 앞으로 돌리게 한다
 func withDbClock(t *testing.T) *time.Time {
 	now := time.Unix(1_800_000_000, 0)
-	original := dbNow
-	dbNow = func() time.Time { return now }
-	t.Cleanup(func() { dbNow = original })
+	original := tokenNow
+	tokenNow = func() time.Time { return now }
+	t.Cleanup(func() { tokenNow = original })
 	return &now
 }
 
@@ -81,9 +81,9 @@ func dbTokenClient(s *dbTokenServer, now *time.Time, appKey string, maxRetries i
 
 func withDbTokenCacheDir(t *testing.T) string {
 	dir := t.TempDir()
-	original := dbTokenCacheDir
-	dbTokenCacheDir = dir
-	t.Cleanup(func() { dbTokenCacheDir = original })
+	original := tokenCacheDir
+	tokenCacheDir = dir
+	t.Cleanup(func() { tokenCacheDir = original })
 	return dir
 }
 

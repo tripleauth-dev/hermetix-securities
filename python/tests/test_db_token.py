@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from hermetix import tokens
 from hermetix.brokers.db import DbClient
 from hermetix.errors import AuthError, RateLimitError
 
@@ -88,7 +89,7 @@ def test_auth_failure_is_not_retried_against_server_during_cooldown(clock):
 
 
 def test_issued_token_is_shared_through_file_cache(clock, tmp_path, monkeypatch):
-    monkeypatch.setattr(db_mod, "TOKEN_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(tokens, "CACHE_DIR", tmp_path)
     first = FakeServer(issued("tok-shared"))
     client(first, clock).get_account()
 
@@ -109,7 +110,7 @@ def test_issued_token_is_shared_through_file_cache(clock, tmp_path, monkeypatch)
 
 
 def test_cached_token_near_expiry_is_ignored(clock, tmp_path, monkeypatch):
-    monkeypatch.setattr(db_mod, "TOKEN_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(tokens, "CACHE_DIR", tmp_path)
     client(FakeServer(issued("tok-old")), clock).get_account()
     clock[0] += 86400 - 300  # 만료 5분 전 - 갱신 여유(10분) 안
     server = FakeServer(issued("tok-new"))

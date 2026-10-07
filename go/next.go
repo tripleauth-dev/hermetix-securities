@@ -16,13 +16,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -102,10 +100,8 @@ type NextClient struct {
 	environment  TradingEnvironment
 	http         *http.Client
 	// 429 는 Retry-After 만큼 기다렸다가 최대 2회 재시도. 쓰로틀은 없다 (초당 한도가 넉넉함)
-	limiter      *rateLimiter
-	tokenMu      sync.Mutex
-	token        string
-	tokenExpires time.Time
+	limiter *rateLimiter
+	tokens  *tokenManager
 	// 테스트에서 교체 가능한 호출 지점
 	call func(method, path string, account bool, jsonBody map[string]any) (map[string]any, error)
 }
@@ -119,6 +115,7 @@ func NewNextClient(clientID, clientSecret string) *NextClient {
 		http:        &http.Client{Timeout: 30 * time.Second},
 		limiter:     newRateLimiter(0, 2, func(attempt int) time.Duration { return time.Duration(attempt) * time.Second }),
 	}
+	c.tokens = newTokenManager("next", clientID, time.Minute, c.issueToken)
 	c.call = c.request
 	return c
 }
@@ -433,11 +430,7 @@ func nextOrder(body map[string]any) Order {
 }
 
 func (c *NextClient) request(method, path string, account bool, jsonBody map[string]any) (map[string]any, error) {
-	do := func() (map[string]any, error) {
-		token, err := c.getToken()
-		if err != nil {
-			return nil, err
-		}
+	do := func(token string) (map[string]any, error) {
 		headers := map[string]string{
 			"Authorization":     "Bearer " + token,
 			NextRequestIDHeader: NewRequestID(),
@@ -461,17 +454,8 @@ func (c *NextClient) request(method, path string, account bool, jsonBody map[str
 		return body, nil
 	}
 
-	return c.limiter.execute("next", func() (map[string]any, error) {
-		body, err := do()
-		var authErr *AuthError
-		if errors.As(err, &authErr) {
-			c.tokenMu.Lock()
-			c.token = "" // 토큰 만료 - 1회 재발급 후 재시도
-			c.tokenMu.Unlock()
-			return do()
-		}
-		return body, err
-	})
+	// 토큰 거부(만료) 시 1회 재발급 후 재시도는 tokenManager.call
+	return c.limiter.execute("next", func() (map[string]any, error) { return c.tokens.call(do) })
 }
 
 // mapNextError — v1.3 에러 type ↔ HTTP: validation(400) authentication(401) permission(403) not_found(404)
@@ -501,42 +485,45 @@ func mapNextError(status int, e map[string]any, retryAfterSeconds float64) error
 	}
 }
 
-// nextTokenError 는 토큰 발급 API 전용 에러 형식을 AuthError 로 바꾼다.
+// nextTokenError 는 토큰 발급 API 전용 에러 형식을 AuthError(429 는 RateLimitError) 로 바꾼다.
 // 400/401 은 OAuth 표준 {"error":"invalid_client","error_description":"..."}, 429/5xx 는 플랫폼 엔벨로프.
-func nextTokenError(status int, body map[string]any) error {
+func nextTokenError(status int, body map[string]any, retryAfterSeconds float64) error {
 	if code, ok := body["error"].(string); ok {
 		return newAuthError(status, code, fmt.Sprintf("Next 토큰 발급 실패(%s): %s", code, str(body["error_description"])))
 	}
 	e := obj(body, "error")
-	return newAuthError(status, str(e["code"]), fmt.Sprintf("Next 토큰 발급 실패(%s): %s", str(e["code"]), str(e["message"])))
+	msg := fmt.Sprintf("Next 토큰 발급 실패(%s): %s", str(e["code"]), str(e["message"]))
+	if status == 429 {
+		if retryAfterSeconds <= 0 {
+			retryAfterSeconds = TokenFailureCooldown.Seconds()
+		}
+		return newRateLimitErrorWithRetryAfter(status, str(e["code"]), msg, retryAfterSeconds)
+	}
+	return newAuthError(status, str(e["code"]), msg)
 }
 
-func (c *NextClient) getToken() (_ string, err error) {
-	c.tokenMu.Lock()
-	defer c.tokenMu.Unlock()
-	if c.token != "" && time.Now().Before(c.tokenExpires.Add(-time.Minute)) {
-		return c.token, nil
-	}
+func (c *NextClient) getToken() (string, error) { return c.tokens.get() }
+
+func (c *NextClient) issueToken() (_ string, _ time.Time, err error) {
 	defer c.usage().Measure("auth")(&err) // 실제 발급 경로만 센다 (캐시 히트는 제외)
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {c.clientID},
 		"client_secret": {c.clientSecret},
 	}
-	status, body, err := httpJSON(c.http, "POST", c.baseURL+"/v1/oauth/token",
+	status, body, resHeaders, err := httpJSONHeaders(c.http, "POST", c.baseURL+"/v1/oauth/token",
 		map[string]string{
 			"Content-Type":      "application/x-www-form-urlencoded",
 			NextRequestIDHeader: NewRequestID(),
 		},
 		[]byte(form.Encode()))
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	token := str(body["access_token"])
 	if status != 200 || token == "" {
-		return "", nextTokenError(status, body)
+		retryAfter, _ := strconv.ParseFloat(strings.TrimSpace(resHeaders.Get("Retry-After")), 64)
+		return "", time.Time{}, nextTokenError(status, body, retryAfter)
 	}
-	c.token = token
-	c.tokenExpires = time.Now().Add(time.Duration(d(body["expires_in"]).IntPart()) * time.Second)
-	return c.token, nil
+	return token, tokenExpiresIn(body["expires_in"], 12*time.Hour), nil
 }

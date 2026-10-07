@@ -21,6 +21,7 @@ import com.tripleauth.hermetix.broker.StreamingBrokerClient
 import com.tripleauth.hermetix.broker.TradingEnvironment
 import com.tripleauth.hermetix.broker.UsageTelemetry
 import com.tripleauth.hermetix.broker.symbolCode
+import com.tripleauth.hermetix.client.BrokerTokenManager
 import com.tripleauth.hermetix.client.dto.AccountResponse
 import com.tripleauth.hermetix.client.dto.BuyingPowerResponse
 import com.tripleauth.hermetix.client.dto.CalendarResponse
@@ -46,6 +47,7 @@ import org.springframework.http.MediaType
 import org.springframework.util.LinkedMultiValueMap
 import org.springframework.web.client.RestClient
 import java.math.BigDecimal
+import java.time.Clock
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -60,7 +62,7 @@ import java.util.UUID
  * 규약 (공식 문서 기준):
  * - `/api/v1/…` + `Authorization: Bearer`. 계좌·자산·주문 API 는 `X-Tossinvest-Account: {accountSeq}` 헤더 필수
  * - 성공 `{"result": …}`, 에러 `{"error": {requestId, code, message, data}}`. 토큰 발급만 OAuth 표준 `{error, error_description}`
- * - client 당 유효 토큰 1개 — 재발급하면 이전 토큰이 즉시 무효(`token-revoked`). 여러 프로세스에서 같은 키를 쓰지 말 것
+ * - client 당 유효 토큰 1개 — 재발급하면 이전 토큰이 즉시 무효(`token-revoked`). 같은 키의 프로세스끼리는 파일 캐시로 토큰을 나눠 쓴다 ([BrokerTokenManager])
  * - 429 는 `Retry-After` + `X-RateLimit-…`. 그룹별 초당 한도(자산 5, 주문 10, 주문정보 6, 계좌 1)
  * - 한 계좌로 KRX·미국 주식을 모두 다룬다 — 보유·주문의 심볼은 `KRX:005930` / `US:AAPL` 로 접두를 붙여 돌려준다
  *
@@ -71,10 +73,14 @@ import java.util.UUID
  * - 취소·정정은 **새 orderId** 를 발급한다 → `cancelOrder` 는 원주문 ID 를 유지하고 PENDING_CANCEL 로 응답
  * - 캘린더는 KRX 합성(`KrxCalendar`) — 미국 종목만 다루는 전략은 `regularHoursOnly=false` 로 두고 직접 판단해야 한다
  */
-class TossApiClient(
+class TossApiClient internal constructor(
     private val properties: TossApiProperties,
     private val objectMapper: ObjectMapper,
+    clock: Clock,
+    sleeper: (Long) -> Unit,
 ) : StreamingBrokerClient {
+
+    constructor(properties: TossApiProperties, objectMapper: ObjectMapper) : this(properties, objectMapper, Clock.systemUTC(), Thread::sleep)
 
     private val logger = KotlinLogging.logger { }
 
@@ -104,13 +110,20 @@ class TossApiClient(
         minIntervalMillis = properties.throttleMillis,
         maxRetries = 3,
         backoffMillis = { attempt -> 1000L shl (attempt - 1) }, // 1s → 2s → 4s (문서 권장)
+        sleeper = sleeper,
     )
 
-    @Volatile
-    private var cachedToken: Pair<String, Instant>? = null
+    /**
+     * 토큰 수명주기 — 메모리 → 파일 캐시 → 발급, 발급 실패 60초 쿨다운, 거부 토큰 폐기 후 1회 재시도.
+     * 재발급이 이전 토큰을 무효로 만들므로 파일 캐시로 같은 키의 프로세스끼리 토큰을 나눠 쓴다
+     */
+    private val tokens = BrokerTokenManager("toss", properties.clientId, properties.tokenRefreshMarginSeconds, clock) { issueToken(clock) }
 
     @Volatile
     private var resolvedAccountSeq: String = properties.accountSeq
+
+    /** 계좌 조회 전용 잠금 — 토큰 잠금과 분리 (계좌 조회 호출이 토큰 발급을 거친다) */
+    private val accountLock = Any()
 
     // ------------------------------------------------------------------ market
 
@@ -307,7 +320,7 @@ class TossApiClient(
     /** 계좌 순번 — 설정이 비어 있으면 `/api/v1/accounts` 의 첫 BROKERAGE 계좌 */
     internal fun accountSeq(): String {
         resolvedAccountSeq.takeIf { it.isNotBlank() }?.let { return it }
-        synchronized(this) {
+        synchronized(accountLock) {
             resolvedAccountSeq.takeIf { it.isNotBlank() }?.let { return it }
             val accounts = call(HttpMethod.GET, "/api/v1/accounts").toList()
             val picked = accounts.firstOrNull { it.path("accountType").asText() == "BROKERAGE" } ?: accounts.firstOrNull()
@@ -322,14 +335,14 @@ class TossApiClient(
 
     /** 성공 envelope 의 `result` 를 돌려준다 */
     private fun call(method: HttpMethod, path: String, body: Any? = null, account: Boolean = false): JsonNode =
-        limiter.execute("toss $path") { callOnce(method, path, body, account) }
+        limiter.execute("toss $path") { tokens.call { token -> callOnce(method, path, body, account, token) } }
 
-    private fun callOnce(method: HttpMethod, path: String, body: Any?, account: Boolean): JsonNode {
+    private fun callOnce(method: HttpMethod, path: String, body: Any?, account: Boolean, token: String): JsonNode {
         val accountHeader = if (account) accountSeq() else null
         return restClient.method(method)
             .uri(path)
             .headers { headers ->
-                headers.set("Authorization", "Bearer ${token()}")
+                headers.set("Authorization", "Bearer $token")
                 if (accountHeader != null) headers.set("X-Tossinvest-Account", accountHeader)
             }
             .apply {
@@ -361,17 +374,10 @@ class TossApiClient(
             }!!
     }
 
-    private fun token(): String {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-        return refreshToken()
-    }
+    private fun token(): String = tokens.get()
 
-    @Synchronized
-    private fun refreshToken(): String = usage.measure("auth") {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-
+    /** 토큰 발급 — 429 는 서버 `Retry-After`(없으면 60초) 의 [RateLimitError] */
+    private fun issueToken(clock: Clock): Pair<String, Instant> = usage.measure("auth") {
         limiter.throttle()
         val form = LinkedMultiValueMap<String, String>().apply {
             add("grant_type", "client_credentials")
@@ -385,16 +391,25 @@ class TossApiClient(
             .exchange { _, res ->
                 val n = runCatching { objectMapper.readTree(res.body.readAllBytes()) }.getOrNull() ?: objectMapper.createObjectNode()
                 if (!res.statusCode.is2xxSuccessful || !n.hasNonNull("access_token")) {
-                    val code = n.path("error").asText(null)
-                    throw AuthError(res.statusCode.value(), code, "토스 토큰 발급 실패($code): ${n.path("error_description").asText("")}")
+                    val status = res.statusCode.value()
+                    // OAuth 표준 {error, error_description} 또는 플랫폼 엔벨로프 {error: {code, message}}
+                    val error = n.path("error")
+                    val code = if (error.isObject) error.path("code").asText(null) else error.asText(null)
+                    val detail = n.path("error_description").asText("").ifBlank { if (error.isObject) error.path("message").asText("") else "" }
+                    val msg = "토스 토큰 발급 실패($code): $detail"
+                    throw if (status == 429) {
+                        val retryAfter = res.headers.getFirst("Retry-After")?.trim()?.toLongOrNull()
+                        RateLimitError(status, code, msg, retryAfter ?: BrokerTokenManager.FAILURE_COOLDOWN_SECONDS)
+                    } else {
+                        AuthError(status, code, msg)
+                    }
                 }
                 n
-            }!!
+            }
 
-        val token = node.path("access_token").asText()
-        cachedToken = token to Instant.now().plusSeconds(node.path("expires_in").asLong(86400))
-        logger.info { "toss token refreshed / expiresIn=${node.path("expires_in").asLong(86400)}s (이전 토큰은 무효화됨)" }
-        return token
+        val expiresIn = node.path("expires_in").asLong(86400)
+        logger.info { "toss token issued / expiresIn=${expiresIn}s (이전 토큰은 무효화됨)" }
+        node.path("access_token").asText() to clock.instant().plusSeconds(expiresIn)
     }
 
     private fun parseInstant(text: String?): Instant? =

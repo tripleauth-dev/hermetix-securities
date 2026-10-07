@@ -19,6 +19,7 @@ import com.tripleauth.hermetix.broker.RateLimiter
 import com.tripleauth.hermetix.broker.TradingEnvironment
 import com.tripleauth.hermetix.broker.UsageTelemetry
 import com.tripleauth.hermetix.broker.symbolCode
+import com.tripleauth.hermetix.client.BrokerTokenManager
 import com.tripleauth.hermetix.client.dto.AccountResponse
 import com.tripleauth.hermetix.client.dto.BuyingPowerResponse
 import com.tripleauth.hermetix.client.dto.CalendarResponse
@@ -44,7 +45,6 @@ import org.springframework.web.client.RestClient
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Clock
-import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -60,7 +60,7 @@ import java.time.format.DateTimeFormatter
  * - 모든 API 는 `POST`, 본문 `{"In": {...}}`, 응답 `rsp_cd`/`rsp_msg` + `Out`(객체 또는 배열) / `Out1`. TR 코드는 문서용이고 경로로 식별
  * - 헤더 `authorization: Bearer` + `cont_yn`/`cont_key`(연속조회) + 법인만 `mac_address`. appkey 헤더 없음
  * - 토큰 `POST /oauth2/token` 은 form-urlencoded(`appsecretkey`), 24h, 발급 1분 1건(초과 시 403 + `IGW00201` → [RateLimitError]).
- *   만료 전 재발급은 같은 토큰을 돌려준다. 발급 토큰은 [DbTokenCache] 파일로 프로세스 간 재사용하고, 발급 실패 후 60초는 서버에 다시 묻지 않는다
+ *   만료 전 재발급은 같은 토큰을 돌려준다. 파일 캐시·발급 실패 60초 쿨다운·거부 토큰 폐기 후 1회 재시도는 [BrokerTokenManager]
  * - 운영/모의 같은 호스트 — 모의 키로만 분기. **HTTP 200 + `rsp_cd != 00000`** 이 업무 오류이며 이때 `Out` 이 없다
  * - 유량: 앱 20 TPS 이지만 잔고·체결 2 TPS, 예수금 1 TPS → 500ms 쓰로틀 + `IGW00201` 지수 백오프
  *
@@ -106,11 +106,8 @@ class DbApiClient internal constructor(
         sleeper = sleeper,
     )
 
-    @Volatile
-    private var cachedToken: Pair<String, Instant>? = null
-
-    /** 마지막 발급 실패 (쿨다운 종료 시각, 오류) — 쿨다운 동안은 서버에 묻지 않고 같은 오류를 돌려준다 */
-    private var tokenFailure: Pair<Instant, BrokerApiException>? = null
+    /** 토큰 수명주기 — 메모리 → 파일 캐시 → 발급, 발급 실패 60초 쿨다운, 거부 토큰 폐기 후 1회 재시도 */
+    private val tokens = BrokerTokenManager("db", properties.appKey, properties.tokenRefreshMarginSeconds, clock, ::issueToken)
 
     // ------------------------------------------------------------------ market
 
@@ -344,14 +341,15 @@ class DbApiClient internal constructor(
 
     private fun sameOrderNo(a: String, b: String): Boolean = a.trim().trimStart('0') == b.trim().trimStart('0')
 
-    private fun call(path: String, input: Map<String, Any>): JsonNode = limiter.execute("DB $path") { callOnce(path, input) }
+    private fun call(path: String, input: Map<String, Any>): JsonNode =
+        limiter.execute("DB $path") { tokens.call { token -> callOnce(path, input, token) } }
 
-    private fun callOnce(path: String, input: Map<String, Any>): JsonNode =
+    private fun callOnce(path: String, input: Map<String, Any>, token: String): JsonNode =
         restClient.post()
             .uri(path)
             .contentType(MediaType.APPLICATION_JSON)
             .headers { headers ->
-                headers.set("authorization", "Bearer ${token()}")
+                headers.set("authorization", "Bearer $token")
                 headers.set("cont_yn", "N")
                 headers.set("cont_key", "")
                 if (properties.macAddress.isNotBlank()) headers.set("mac_address", properties.macAddress)
@@ -383,33 +381,7 @@ class DbApiClient internal constructor(
     /** 웹소켓은 REST 접근토큰을 매 구독 메시지 헤더에 싣는다 — 재접속 시 [token] 이 갱신한다 */
     override fun openStream(): MarketStream = DbMarketStream(properties, objectMapper, ::token, usage)
 
-    private fun token(): String {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(clock.instant().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-        return refreshToken()
-    }
-
-    @Synchronized
-    private fun refreshToken(): String {
-        val now = clock.instant()
-        cachedToken?.let { if (it.second.isAfter(now.plusSeconds(properties.tokenRefreshMarginSeconds))) return it.first }
-        DbTokenCache.load(objectMapper, properties.appKey, now, properties.tokenRefreshMarginSeconds)?.let {
-            cachedToken = it
-            return it.first
-        }
-        tokenFailure?.let { (until, error) -> if (now.isBefore(until)) throw cooldownError(error, Duration.between(now, until)) }
-
-        val issued = try {
-            issueToken()
-        } catch (e: BrokerApiException) {
-            tokenFailure = clock.instant().plusSeconds(TOKEN_FAILURE_COOLDOWN_SECONDS) to e
-            throw e
-        }
-        tokenFailure = null
-        cachedToken = issued
-        DbTokenCache.save(objectMapper, properties.appKey, issued.first, issued.second)
-        return issued.first
-    }
+    private fun token(): String = tokens.get()
 
     private fun issueToken(): Pair<String, Instant> = usage.measure("auth") {
         limiter.throttle()
@@ -430,26 +402,18 @@ class DbApiClient internal constructor(
                     val code = n.path("rsp_cd").asText(n.path("error").asText(null))
                     val detail = n.path("rsp_msg").asText(n.path("error_description").asText(""))
                     throw if (code == "IGW00201" || status == 429) {
-                        RateLimitError(status, code, "DB 토큰 발급 유량 초과($code): $detail (발급은 1분당 1회 제한)", TOKEN_FAILURE_COOLDOWN_SECONDS)
+                        RateLimitError(status, code, "DB 토큰 발급 유량 초과($code): $detail (발급은 1분당 1회 제한)", BrokerTokenManager.FAILURE_COOLDOWN_SECONDS)
                     } else {
                         AuthError(status, code, "DB 토큰 발급 실패($code): $detail")
                     }
                 }
                 n
-            }!!
+            }
 
         val expiresIn = node.path("expires_in").asLong(86400)
         logger.info { "DB token issued / expiresIn=${expiresIn}s" }
         node.path("access_token").asText() to clock.instant().plusSeconds(expiresIn)
     }
-
-    /** 쿨다운 중 재요청 — 서버에 묻지 않고 같은 종류의 오류를 남은 시간(올림 초)과 함께 돌려준다 */
-    private fun cooldownError(failure: BrokerApiException, remaining: Duration): BrokerApiException =
-        if (failure is RateLimitError) {
-            RateLimitError(failure.httpStatus, failure.errorCode, failure.message, (remaining.toMillis() + 999) / 1000)
-        } else {
-            failure
-        }
 
     private fun BigDecimal.percentToRate(): BigDecimal = divide(BigDecimal(100), 6, RoundingMode.HALF_EVEN)
 
@@ -467,9 +431,6 @@ class DbApiClient internal constructor(
         private val INSUFFICIENT_CODES = setOf("1584", "2714", "2752", "M100")
         private val INVALID_ORDER_CODES = setOf("2706", "3180", "3181")
         private val ORDER_NOT_FOUND_CODES = setOf("3056", "3416")
-
-        /** 토큰 발급은 1분 1건 (초과 시 HTTP 403 + IGW00201). 발급에 실패하면 이 시간 동안 서버에 다시 묻지 않는다 */
-        const val TOKEN_FAILURE_COOLDOWN_SECONDS = 60L
 
         /** 계좌·주문계 `IsuNo` 는 `A005930` 형태일 수 있다 → 6자리 코드로 정규화 */
         fun normalizeCode(raw: String): String {

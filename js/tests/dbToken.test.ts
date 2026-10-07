@@ -7,9 +7,10 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { DbClient, __setDbTokenCacheDirForTests } from "../src/brokers/db.js";
+import { DbClient } from "../src/brokers/db.js";
 import { RateLimiter } from "../src/broker.js";
 import { AuthError, RateLimitError } from "../src/errors.js";
+import { __setTokenCacheDirForTests } from "../src/tokens.js";
 
 const BALANCE = { rsp_cd: "00000", rsp_msg: "정상", Out: { DpsastAmt: "1000", Dps2: "1000", TotEvalAmt: "0" } };
 type Reply = [number, Record<string, unknown>];
@@ -47,7 +48,7 @@ beforeEach(() => {
 afterEach(() => {
   Date.now = realNow;
   globalThis.fetch = realFetch;
-  __setDbTokenCacheDirForTests(null);
+  __setTokenCacheDirForTests(null);
 });
 
 function serve(s: FakeServer): FakeServer {
@@ -97,7 +98,7 @@ test("인증 실패도 쿨다운 동안은 서버에 다시 묻지 않는다", a
 test("발급 토큰은 파일 캐시로 같은 키의 다른 클라이언트와 나눠 쓴다", async () => {
   const dir = mkdtempSync(join(tmpdir(), "hermetix-db-token-"));
   try {
-    __setDbTokenCacheDirForTests(dir);
+    __setTokenCacheDirForTests(dir);
     serve(new FakeServer([issued("tok-shared")]));
     await client().getAccount();
 
@@ -123,7 +124,7 @@ test("발급 토큰은 파일 캐시로 같은 키의 다른 클라이언트와 
 test("만료가 가까운 캐시 토큰은 쓰지 않는다", async () => {
   const dir = mkdtempSync(join(tmpdir(), "hermetix-db-token-"));
   try {
-    __setDbTokenCacheDirForTests(dir);
+    __setTokenCacheDirForTests(dir);
     serve(new FakeServer([issued("tok-old")]));
     await client().getAccount();
     now += (86400 - 300) * 1000;

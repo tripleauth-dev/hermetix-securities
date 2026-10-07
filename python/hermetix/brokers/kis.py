@@ -3,7 +3,7 @@
 실측 기반 (openapivts.koreainvestment.com:29443, 2026-08):
 - 응답 엔벨로프: rt_cd("0"=성공) / msg_cd / msg1 / output*
 - 초당 요청 제한 -> 0.6s 쓰로틀 + EGW00201 백오프 재시도
-- 토큰 발급은 1분당 1회 제한 (토큰은 24h 캐시)
+- 토큰 발급은 1분당 1회 제한(초과 시 EGW00133 → RateLimitError). 토큰은 24h, 파일 캐시로 프로세스 간 재사용 (TokenManager)
 - **모의 서버는 미체결/체결 주문 조회를 제공하지 않는다** (일별주문체결 TR 이
   항상 빈 목록) -> 주문은 어댑터가 메모리 추적, 체결은 보유 수량 변화로 근사.
   앱 재시작 시 추적이 끊긴다 (재시작 후 잔여 미체결 주의)
@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -26,9 +25,13 @@ from ..models import (
     Account, BrokerCapabilities, Candle, CandleInterval, CreateOrderRequest,
     Fill, Holding, MarketDay, Order, OrderEvent, OrderEventType, OrderSide, OrderStatus, Quote, StreamChannel,
 )
+from ..tokens import FAILURE_COOLDOWN_SECONDS, TokenManager
 from .kis_stream import KisMarketStream
 
 logger = logging.getLogger("hermetix")
+
+# 업무 호출이 토큰을 거부 - EGW00121 유효하지 않은 token, EGW00123 기간이 만료된 token (HTTP 500 으로 온다)
+_TOKEN_REJECTED_CODES = {"EGW00121", "EGW00123"}
 
 
 def _d(value, default: str = "0") -> Decimal:
@@ -99,9 +102,7 @@ class KisClient(StreamingBrokerClient):
         # 초당 요청 제한 - 쓰로틀 + EGW00201 백오프 재시도
         self._limiter = RateLimiter(throttle_seconds or (0.1 if live else 0.6), max_retries=3,
                                     backoff=lambda attempt: 1.0 * attempt)
-        self._token: str | None = None
-        self._token_expires_at = 0.0
-        self._token_lock = threading.Lock()
+        self._tokens = TokenManager("kis", appkey, self._issue_token, 300)
         self._tracked: dict[str, _Tracked] = {}
 
     # ------------------------------------------------------------------ market
@@ -293,12 +294,13 @@ class KisClient(StreamingBrokerClient):
     def _call(self, method: str, path: str, tr_id: str, *, query: dict | None = None,
               body: dict | None = None) -> dict:
         return self._limiter.execute(
-            lambda: self._call_once(method, path, tr_id, query=query, body=body), f"KIS {tr_id}")
+            lambda: self._tokens.call(lambda token: self._call_once(method, path, tr_id, token, query=query, body=body)),
+            f"KIS {tr_id}")
 
-    def _call_once(self, method: str, path: str, tr_id: str, *, query: dict | None,
+    def _call_once(self, method: str, path: str, tr_id: str, token: str, *, query: dict | None,
                    body: dict | None) -> dict:
         headers = {
-            "authorization": f"Bearer {self._get_token()}",
+            "authorization": f"Bearer {token}",
             "appkey": self._appkey, "appsecret": self._appsecret,
             "tr_id": tr_id, "custtype": self._custtype,
         }
@@ -311,7 +313,7 @@ class KisClient(StreamingBrokerClient):
                 raise RateLimitError(status, code, msg)
             if "장종료" in msg or "장운영일이 아닙" in msg:
                 raise MarketClosedError(status, code, msg)
-            if status == 401:
+            if status == 401 or code in _TOKEN_REJECTED_CODES:
                 raise AuthError(status, code, msg)
             raise BrokerApiError(status, code, msg)
         return parsed
@@ -360,20 +362,20 @@ class KisClient(StreamingBrokerClient):
             return body["approval_key"]
 
     def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 300:
-            return self._token
-        with self._token_lock:
-            if self._token and time.time() < self._token_expires_at - 300:
-                return self._token
-            with self._usage.measure("auth"):
-                self._limiter.throttle.wait()
-                status, body = self._http.request(
-                    "POST", "/oauth2/tokenP",
-                    json_body={"grant_type": "client_credentials",
-                               "appkey": self._appkey, "appsecret": self._appsecret})
-                if status != 200 or "access_token" not in body:
-                    raise AuthError(status, body.get("error_code"),
-                                    f"KIS 토큰 발급 실패: {body.get('error_description', '')} (발급은 1분당 1회 제한)")
-                self._token = body["access_token"]
-                self._token_expires_at = time.time() + float(body.get("expires_in", 86400))
-                return self._token
+        return self._tokens.get()
+
+    def _issue_token(self) -> tuple[str, float]:
+        with self._usage.measure("auth"):
+            self._limiter.throttle.wait()
+            status, body = self._http.request(
+                "POST", "/oauth2/tokenP",
+                json_body={"grant_type": "client_credentials",
+                           "appkey": self._appkey, "appsecret": self._appsecret})
+            if status != 200 or "access_token" not in body:
+                code = body.get("error_code")
+                detail = body.get("error_description", "")
+                if code == "EGW00133" or status == 429:
+                    raise RateLimitError(status, code, f"KIS 토큰 발급 유량 초과({code}): {detail} (발급은 1분당 1회 제한)",
+                                         FAILURE_COOLDOWN_SECONDS)
+                raise AuthError(status, code, f"KIS 토큰 발급 실패({code}): {detail}")
+            return body["access_token"], time.time() + float(body.get("expires_in", 86400))

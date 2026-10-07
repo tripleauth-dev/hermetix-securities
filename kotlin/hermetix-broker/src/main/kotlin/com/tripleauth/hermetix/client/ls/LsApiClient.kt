@@ -19,6 +19,7 @@ import com.tripleauth.hermetix.broker.RateLimiter
 import com.tripleauth.hermetix.broker.TradingEnvironment
 import com.tripleauth.hermetix.broker.UsageTelemetry
 import com.tripleauth.hermetix.broker.symbolCode
+import com.tripleauth.hermetix.client.BrokerTokenManager
 import com.tripleauth.hermetix.client.dto.AccountResponse
 import com.tripleauth.hermetix.client.dto.BuyingPowerResponse
 import com.tripleauth.hermetix.client.dto.CalendarResponse
@@ -43,6 +44,7 @@ import org.springframework.util.LinkedMultiValueMap
 import org.springframework.web.client.RestClient
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -65,10 +67,14 @@ import java.time.format.DateTimeFormatter
  * 문서로 확정하지 못한 점 (실측 필요): 잔고 `expcode` 의 `A` 접두 여부, `sign` 코드 의미(xingAPI 관례 4·5 하락으로 가정),
  * 응답 숫자 타입(양쪽 허용), 장 마감 오류 코드(메시지로 판단), 미체결 `medosu` 표기("매수"/"매도" 가정)
  */
-class LsApiClient(
+class LsApiClient internal constructor(
     private val properties: LsApiProperties,
     private val objectMapper: ObjectMapper,
+    clock: Clock,
+    sleeper: (Long) -> Unit,
 ) : StreamingBrokerClient {
+
+    constructor(properties: LsApiProperties, objectMapper: ObjectMapper) : this(properties, objectMapper, Clock.systemUTC(), Thread::sleep)
 
     private val logger = KotlinLogging.logger { }
 
@@ -93,12 +99,12 @@ class LsApiClient(
 
     private val restClient = RestClient.builder().baseUrl(properties.baseUrl).build()
 
-    private val limiter = RateLimiter(properties.throttleMillis, maxRetries = 3, backoffMillis = { attempt -> 1000L * attempt })
+    private val limiter = RateLimiter(properties.throttleMillis, maxRetries = 3, backoffMillis = { attempt -> 1000L * attempt }, sleeper = sleeper)
     /** 차트 TR 은 초당 1건 — 별도 간격 */
-    private val chartLimiter = RateLimiter(properties.chartThrottleMillis, maxRetries = 0)
+    private val chartLimiter = RateLimiter(properties.chartThrottleMillis, maxRetries = 0, sleeper = sleeper)
 
-    @Volatile
-    private var cachedToken: Pair<String, Instant>? = null
+    /** 토큰 수명주기 — 메모리 → 파일 캐시 → 발급, 발급 실패 60초 쿨다운, 거부 토큰 폐기 후 1회 재시도 */
+    private val tokens = BrokerTokenManager("ls", properties.appKey, properties.tokenRefreshMarginSeconds, clock) { issueToken(clock) }
 
     // ------------------------------------------------------------------ market
 
@@ -328,14 +334,14 @@ class LsApiClient(
     private fun sameOrderNo(a: String, b: String): Boolean = a.trim().trimStart('0') == b.trim().trimStart('0')
 
     private fun call(path: String, trCd: String, inBlock: String, input: Map<String, Any>): JsonNode =
-        limiter.execute("LS $trCd") { callOnce(path, trCd, inBlock, input) }
+        limiter.execute("LS $trCd") { tokens.call { token -> callOnce(path, trCd, inBlock, input, token) } }
 
-    private fun callOnce(path: String, trCd: String, inBlock: String, input: Map<String, Any>): JsonNode =
+    private fun callOnce(path: String, trCd: String, inBlock: String, input: Map<String, Any>, token: String): JsonNode =
         restClient.post()
             .uri(path)
             .contentType(MediaType.APPLICATION_JSON)
             .headers { headers ->
-                headers.set("authorization", "Bearer ${token()}")
+                headers.set("authorization", "Bearer $token")
                 headers.set("tr_cd", trCd)
                 headers.set("tr_cont", "N")
                 headers.set("tr_cont_key", "")
@@ -369,17 +375,10 @@ class LsApiClient(
     /** 실시간 스트림 — 매 메시지 헤더에 REST 토큰을 싣는다 (재접속 시 캐시/재발급 토큰) */
     override fun openStream(): MarketStream = LsMarketStream(properties, objectMapper, ::token, usage)
 
-    private fun token(): String {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-        return refreshToken()
-    }
+    private fun token(): String = tokens.get()
 
-    @Synchronized
-    private fun refreshToken(): String = usage.measure("auth") {
-        val cached = cachedToken
-        if (cached != null && cached.second.isAfter(Instant.now().plusSeconds(properties.tokenRefreshMarginSeconds))) return cached.first
-
+    /** 토큰 발급 — 유량 초과(`IGW00201`·429)는 [RateLimitError] */
+    private fun issueToken(clock: Clock): Pair<String, Instant> = usage.measure("auth") {
         limiter.throttle()
         val form = LinkedMultiValueMap<String, String>().apply {
             add("grant_type", "client_credentials")
@@ -394,16 +393,21 @@ class LsApiClient(
             .exchange { _, res ->
                 val n = runCatching { objectMapper.readTree(res.body.readAllBytes()) }.getOrNull() ?: objectMapper.createObjectNode()
                 if (!res.statusCode.is2xxSuccessful || !n.hasNonNull("access_token")) {
+                    val status = res.statusCode.value()
                     val code = n.path("error_code").asText(n.path("rsp_cd").asText(null))
-                    throw AuthError(res.statusCode.value(), code, "LS 토큰 발급 실패($code): ${n.path("error_description").asText(n.path("rsp_msg").asText(""))}")
+                    val detail = n.path("error_description").asText(n.path("rsp_msg").asText(""))
+                    throw if (code == "IGW00201" || status == 429) {
+                        RateLimitError(status, code, "LS 토큰 발급 유량 초과($code): $detail", BrokerTokenManager.FAILURE_COOLDOWN_SECONDS)
+                    } else {
+                        AuthError(status, code, "LS 토큰 발급 실패($code): $detail")
+                    }
                 }
                 n
-            }!!
+            }
 
-        val token = node.path("access_token").asText()
-        cachedToken = token to Instant.now().plusSeconds(node.path("expires_in").asLong(86400))
-        logger.info { "LS token refreshed / expiresIn=${node.path("expires_in").asLong(86400)}s" }
-        return token
+        val expiresIn = node.path("expires_in").asLong(86400)
+        logger.info { "LS token issued / expiresIn=${expiresIn}s" }
+        node.path("access_token").asText() to clock.instant().plusSeconds(expiresIn)
     }
 
     private fun BigDecimal.percentToRate(): BigDecimal = divide(BigDecimal(100), 6, RoundingMode.HALF_EVEN)

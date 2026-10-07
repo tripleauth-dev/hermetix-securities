@@ -78,7 +78,7 @@ import java.util.UUID
  * 서버 스펙이 바뀌어도 이 어댑터 안에서만 흡수한다 (KIS/키움 어댑터와 같은 방식).
  *
  * 규약:
- * - 모든 호출은 Bearer 토큰을 자동 첨부하며, 401 발생 시 토큰을 1회 재발급 후 재시도한다
+ * - 모든 호출은 Bearer 토큰을 자동 첨부하며, 401 발생 시 거부된 토큰을 버리고 1회 재발급 후 재시도한다 ([BrokerTokenManager])
  * - 429 는 `Retry-After` 만큼 기다렸다가 최대 2회 재시도한다 ([RateLimiter]) — 쓰로틀은 없다 (초당 한도가 넉넉함)
  * - 모든 고객 API 에 `X-Request-Id` 를 붙인다 (토큰 발급 외 전 API 필수 — 누락 시 400 `request-id-required`)
  * - 계좌·자산·주문 API 는 `X-Next-Account-Id` 헤더를 자동으로 붙인다 (구 `X-Nextsecurities-Account` 에서 개명.
@@ -86,11 +86,15 @@ import java.util.UUID
  * - 시각은 ISO 8601 · KST (오프셋 생략 시 KST) → 공통 모델의 `Instant` 로 변환
  * - 등락률·손익률은 서버가 % 단위로 주므로 공통 모델 규약(비율)에 맞춰 100 으로 나눈다
  */
-class NextApiClient(
+class NextApiClient internal constructor(
     private val properties: NextApiProperties,
     private val tokenManager: TokenManager,
     private val objectMapper: ObjectMapper,
+    sleeper: (Long) -> Unit,
 ) : BrokerClient {
+
+    constructor(properties: NextApiProperties, tokenManager: TokenManager, objectMapper: ObjectMapper) :
+        this(properties, tokenManager, objectMapper, Thread::sleep)
 
     private val logger = KotlinLogging.logger { }
 
@@ -128,7 +132,7 @@ class NextApiClient(
         .baseUrl(properties.baseUrl)
         .build()
 
-    private val limiter = RateLimiter(minIntervalMillis = 0, maxRetries = 2, backoffMillis = { attempt -> 1000L * attempt })
+    private val limiter = RateLimiter(minIntervalMillis = 0, maxRetries = 2, backoffMillis = { attempt -> 1000L * attempt }, sleeper = sleeper)
 
     // ------------------------------------------------------------------ market
 
@@ -432,16 +436,8 @@ class NextApiClient(
         }
     }
 
-    private fun <T> executeWithRetry(call: (String) -> T): T = limiter.execute("next") {
-        val token = tokenManager.getToken()
-        try {
-            call(token)
-        } catch (e: AuthError) {
-            logger.warn { "auth error(${e.errorCode}) - refreshing token and retrying once" }
-            tokenManager.invalidate()
-            call(tokenManager.getToken())
-        }
-    }
+    /** 토큰 거부(만료) 시 1회 재발급 후 재시도는 [BrokerTokenManager.call] */
+    private fun <T> executeWithRetry(call: (String) -> T): T = limiter.execute("next") { tokenManager.tokens.call(call) }
 
     companion object {
         const val ACCOUNT_HEADER = "X-Next-Account-Id"

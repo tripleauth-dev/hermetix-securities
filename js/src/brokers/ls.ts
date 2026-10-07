@@ -18,6 +18,7 @@ import type {
   Fill, Holding, MarketDay, Order, OrderSide, OrderStatus, Quote, TradingEnvironment,
 } from "../models.js";
 import { symbolCodeFor } from "../models.js";
+import { FAILURE_COOLDOWN_SECONDS, TokenManager } from "../tokens.js";
 import { LsMarketStream } from "./lsStream.js";
 
 const AUTH_CODES = new Set(["IGW00121", "IGW00123"]);
@@ -64,8 +65,7 @@ export class LsClient implements StreamingBrokerClient {
   };
 
   readonly wsUrl: string;
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+  private readonly tokens: TokenManager;
   private readonly limiter: RateLimiter;
   private readonly chartLimiter: RateLimiter;
 
@@ -83,7 +83,8 @@ export class LsClient implements StreamingBrokerClient {
     this.limiter = new RateLimiter(throttleMs, 3, (attempt) => 1000 * attempt);
     this.chartLimiter = new RateLimiter(chartThrottleMs, 0); // 차트 TR 초당 1건
     this.wsUrl = wsUrl || (environment === "LIVE" ? LsClient.LIVE_WS_URL : LsClient.PAPER_WS_URL);
-      this.usage = instrumentBroker(this);
+    this.tokens = new TokenManager("ls", appKey, () => this.issueToken(), 600);
+    this.usage = instrumentBroker(this);
   }
 
   /** 웹소켓은 REST 접근토큰을 매 메시지 헤더에 싣는다. 종목마다 KOSPI·KOSDAQ TR 을 둘 다 등록한다 (문서 기반, 실측 전) */
@@ -211,11 +212,11 @@ export class LsClient implements StreamingBrokerClient {
   }
 
   private call(path: string, trCd: string, inBlock: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.limiter.execute(() => this.callOnce(path, trCd, inBlock, input), `LS ${trCd}`);
+    return this.limiter.execute(() => this.tokens.call((token) => this.callOnce(path, trCd, inBlock, input, token)), `LS ${trCd}`);
   }
 
-  private async callOnce(path: string, trCd: string, inBlock: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const headers: Record<string, string> = { "Content-Type": "application/json; charset=utf-8", authorization: `Bearer ${await this.getToken()}`, tr_cd: trCd, tr_cont: "N", tr_cont_key: "" };
+  private async callOnce(path: string, trCd: string, inBlock: string, input: Record<string, unknown>, token: string): Promise<Record<string, unknown>> {
+    const headers: Record<string, string> = { "Content-Type": "application/json; charset=utf-8", authorization: `Bearer ${token}`, tr_cd: trCd, tr_cont: "N", tr_cont_key: "" };
     if (this.macAddress) headers.mac_address = this.macAddress;
     const [status, parsed, resHeaders] = await httpJson(this.baseUrl + path, { method: "POST", headers, body: JSON.stringify({ [inBlock]: input }) });
     const code = String(parsed.rsp_cd ?? parsed.error_code ?? "").trim();
@@ -234,19 +235,22 @@ export class LsClient implements StreamingBrokerClient {
     return parsed;
   }
 
-  private async getToken(): Promise<string> {
+  private getToken(): Promise<string> {
+    return this.tokens.get();
+  }
+
+  private issueToken(): Promise<{ token: string; expiresAt: number }> {
     return this.usage.measure("auth", async () => {
-    if (this.token && Date.now() < this.tokenExpiresAt - 600_000) return this.token;
-    await this.limiter.throttle.wait();
-    const form = new URLSearchParams({ grant_type: "client_credentials", appkey: this.appKey, appsecretkey: this.appSecret, scope: "oob" });
-    const [status, body] = await httpJson(`${this.baseUrl}/oauth2/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
-    if (status !== 200 || typeof body.access_token !== "string") {
-      const code = String(body.error_code ?? body.rsp_cd ?? "");
-      throw new AuthError(status, code || null, `LS 토큰 발급 실패(${code}): ${body.error_description ?? body.rsp_msg ?? ""}`);
-    }
-    this.token = body.access_token;
-    this.tokenExpiresAt = Date.now() + Number(body.expires_in ?? 86400) * 1000;
-    return this.token;
+      await this.limiter.throttle.wait();
+      const form = new URLSearchParams({ grant_type: "client_credentials", appkey: this.appKey, appsecretkey: this.appSecret, scope: "oob" });
+      const [status, body] = await httpJson(`${this.baseUrl}/oauth2/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+      if (status !== 200 || typeof body.access_token !== "string") {
+        const code = String(body.error_code ?? body.rsp_cd ?? "");
+        const detail = String(body.error_description ?? body.rsp_msg ?? "");
+        if (code === "IGW00201" || status === 429) throw new RateLimitError(status, code || null, `LS 토큰 발급 유량 초과(${code}): ${detail}`, FAILURE_COOLDOWN_SECONDS);
+        throw new AuthError(status, code || null, `LS 토큰 발급 실패(${code}): ${detail}`);
+      }
+      return { token: body.access_token, expiresAt: Date.now() + Number(body.expires_in ?? 86400) * 1000 };
     });
   }
 }
