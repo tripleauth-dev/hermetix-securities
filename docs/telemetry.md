@@ -1,6 +1,6 @@
 # 사용량 텔레메트리 (Usage Telemetry) — 계약 v1
 
-Hermetix SDK(Kotlin·Python·JS·Go)는 **어느 증권사가 얼마나 쓰이는지**를 집계해 `hermetix-service` 로 보내고, 그 데이터로 [증권사 사용량 랭킹](https://github.com/tauthdev/hermetix-service)을 공개합니다. OpenRouter 의 모델 랭킹이 실사용량으로 만들어지듯, 국내외 증권사 오픈 API 가 실제로 어떻게 쓰이는지를 보여주는 데이터입니다.
+Hermetix SDK(Kotlin·Python·JS·Go)는 **어느 증권사가 얼마나 쓰이는지**를 집계해 `hermetix-service` 로 보내고, 그 데이터로 [증권사 사용량 랭킹](https://hermetix.dev/rankings)을 공개합니다. OpenRouter 의 모델 랭킹이 실사용량으로 만들어지듯, 국내외 증권사 오픈 API 가 실제로 어떻게 쓰이는지를 보여주는 데이터입니다.
 
 이 문서는 네 언어 SDK 와 서버가 공유하는 **유일한 계약**입니다. 페이로드 필드·값의 의미·전송 규칙을 바꾸려면 여기부터 고치고 `schema` 를 올립니다.
 
