@@ -11,7 +11,7 @@ import {
   MarketClosedError, NextClient, NhClient, OrderNotFoundError, RateLimitError, TossClient, verifyBrokerConformance,
 } from "../src/index.js";
 import type { BrokerClient, TradeTick } from "../src/index.js";
-import { BrokerUsage, SIGNING_KEY, SIGNING_KEY_ID, UsageTelemetry, __setEndpointForTests, classifyError, instrumentBroker, signTelemetry } from "../src/telemetry.js";
+import { BrokerUsage, SIGNING_KEY, SIGNING_KEY_ID, UsageTelemetry, __postForTests, __setEndpointForTests, classifyError, instrumentBroker, signTelemetry } from "../src/telemetry.js";
 import { Queue, withServer } from "./wsHarness.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -251,9 +251,10 @@ test("기본 전송은 서명 헤더 3개를 싣고 본문을 그대로 보낸�
   const originalTransport = UsageTelemetry.transport;
   try {
     __setEndpointForTests(`http://127.0.0.1:${port}/v1/usage`);
+    UsageTelemetry.transport = __postForTests;
     UsageTelemetry.drain();
     new BrokerUsage("kis", "PAPER").measure("quotes", () => 1);
-    await UsageTelemetry.flushNow(); // transport 는 기본(postDefault) 그대로
+    await UsageTelemetry.flushNow();
     assert.equal(received.length, 1);
     const { headers, body } = received[0];
     assert.equal(headers["x-hermetix-key-id"], "v1");
