@@ -133,6 +133,9 @@ function bucketFor(broker: string, environment: TradingEnvironment): BucketStats
   return b.stats;
 }
 
+/** 기본 전송 함수 — 테스트 셋업이 transport 를 버린 뒤에도 전송 자체를 검증할 수 있게 노출한다 (index 로는 내보내지 않음) */
+export const __postForTests = (body: string): Promise<void> => postDefault(body);
+
 async function postDefault(body: string): Promise<void> {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), 3_000);
