@@ -9,6 +9,7 @@ package hermetix
 //   - 한 계좌로 KRX·미국을 다룬다 → 보유·주문 심볼은 KRX:005930 / US:AAPL 로 접두를 붙여 돌려준다
 //   - 공통 모델과의 차이: 시세에 등락·거래량 없음, 예수금 없음(KRW 매수가능금액으로 대체), 체결 엔드포인트 없음(종료 주문 execution 집계),
 //     취소·정정은 새 orderId 발급(원주문 ID 유지 + PendingCancel), 캘린더는 KRX 합성
+//   - 보유 평가금액·손익은 원화(미국 종목은 USD 금액을 매매기준율로 환산) → 계좌 총평가도 원화 한 숫자
 
 import (
 	"encoding/json"
@@ -112,16 +113,14 @@ func tossTime(v any) *time.Time {
 	return nil
 }
 
-// tossAmount - {"amount": {"krw": …}} 또는 {"amount": "…"} 양쪽을 KRW 금액으로 읽는다.
-func tossAmount(v any) *decimal.Decimal {
-	m, _ := v.(map[string]any)
-	if m == nil {
+// tossKRW - 종목 통화 금액에 원화 환율을 곱한다 (금액이 없으면 nil).
+func tossKRW(v any, rate decimal.Decimal) *decimal.Decimal {
+	amount := dOrNil(v)
+	if amount == nil {
 		return nil
 	}
-	if nested, ok := m["amount"].(map[string]any); ok {
-		return dOrNil(nested["krw"])
-	}
-	return dOrNil(m["amount"])
+	krw := amount.Mul(rate)
+	return &krw
 }
 
 func tossMarketSymbol(o map[string]any) string {
@@ -253,25 +252,38 @@ func (c *TossClient) GetAccount() (_ Account, err error) {
 	return Account{AccountID: acct, Currency: "KRW", Cash: cash, PortfolioValue: cash.Add(marketValue), Status: "ACTIVE"}, nil
 }
 
+// GetHoldings - 평가금액·평가손익은 원화. 미국 종목은 종목 통화(USD) 금액을 매매기준율(midRate)로 환산한다. 단가는 종목 통화 그대로.
 func (c *TossClient) GetHoldings() (_ []Holding, err error) {
 	defer c.usage().Measure("holdings")(&err)
 	result, err := c.call("GET", "/api/v1/holdings", nil, nil, true)
 	if err != nil {
 		return nil, err
 	}
+	rates := map[string]decimal.Decimal{"KRW": decimal.NewFromInt(1)}
 	holdings := make([]Holding, 0)
 	for _, h := range tossList(tossObj(result)["items"]) {
 		qty := dOrNil(h["quantity"])
 		if qty == nil || !qty.IsPositive() {
 			continue
 		}
-		market := "KRX"
+		market, currency := "KRX", "KRW"
 		if str(h["marketCountry"]) == "US" {
-			market = "US"
+			market, currency = "US", "USD"
+		}
+		if v := str(h["currency"]); v != "" {
+			currency = v
+		}
+		rate, ok := rates[currency]
+		if !ok {
+			if rate, err = c.krwRate(currency); err != nil {
+				return nil, err
+			}
+			rates[currency] = rate
 		}
 		holdings = append(holdings, Holding{
 			Symbol: market + ":" + str(h["symbol"]), Quantity: *qty, AvgEntryPrice: d(h["averagePurchasePrice"]), CurrentPrice: dOrNil(h["lastPrice"]),
-			MarketValue: tossAmount(h["marketValue"]), UnrealizedPnl: tossAmount(h["profitLoss"]), UnrealizedPnlRate: dOrNil(tossObj(h["profitLoss"])["rate"]), // 이미 소수 비율
+			MarketValue: tossKRW(tossObj(h["marketValue"])["amount"], rate), UnrealizedPnl: tossKRW(tossObj(h["profitLoss"])["amount"], rate),
+			UnrealizedPnlRate: dOrNil(tossObj(h["profitLoss"])["rate"]), // 이미 소수 비율
 		})
 	}
 	return holdings, nil
@@ -395,6 +407,23 @@ func tossOrder(o map[string]any) Order {
 		Quantity: dOrNil(o["quantity"]), LimitPrice: dOrNil(o["price"]), FilledQuantity: &filled, AvgFillPrice: dOrNil(ex["averageFilledPrice"]),
 		ClientOrderID: str(o["clientOrderId"]), SubmittedAt: tossTime(o["orderedAt"]), CanceledAt: tossTime(o["canceledAt"]),
 	}
+}
+
+// krwRate - 1 {currency} 의 원화 매매기준율 (GET /api/v1/exchange-rate, 약 5분마다 갱신)
+func (c *TossClient) krwRate(currency string) (decimal.Decimal, error) {
+	result, err := c.call("GET", "/api/v1/exchange-rate", map[string]string{"baseCurrency": currency, "quoteCurrency": "KRW"}, nil, false)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	obj := tossObj(result)
+	rate := dOrNil(obj["midRate"])
+	if rate == nil {
+		rate = dOrNil(obj["rate"])
+	}
+	if rate == nil || !rate.IsPositive() {
+		return decimal.Zero, &BrokerAPIError{200, "", "토스 " + currency + "/KRW 환율을 받지 못했습니다"}
+	}
+	return *rate, nil
 }
 
 func (c *TossClient) buyingPower(currency string) (decimal.Decimal, error) {

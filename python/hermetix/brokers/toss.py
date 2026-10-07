@@ -8,6 +8,7 @@
 한 계좌로 KRX·미국을 다룬다 → 보유·주문 심볼은 KRX:005930 / US:AAPL 로 접두를 붙여 돌려준다.
 공통 모델과의 차이: 시세에 등락·거래량 없음, 예수금 없음(KRW 매수가능금액으로 대체), 체결 엔드포인트 없음(종료 주문 execution 집계),
 취소·정정은 새 orderId 발급(원주문 ID 유지 + PENDING_CANCEL), 캘린더는 KRX 합성.
+보유 평가금액·손익은 원화(미국 종목은 USD 금액을 매매기준율로 환산) → 계좌 총평가도 원화 한 숫자.
 """
 from __future__ import annotations
 
@@ -125,18 +126,26 @@ class TossClient(StreamingBrokerClient):
         return Account(account_id=self._account(), currency="KRW", cash=cash, portfolio_value=cash + market_value)
 
     def get_holdings(self) -> list[Holding]:
+        """평가금액·평가손익은 원화 - 미국 종목은 종목 통화(USD) 금액을 매매기준율(midRate)로 환산한다. 단가는 종목 통화 그대로."""
         result = self._call("GET", "/api/v1/holdings", account=True) or {}
+        rates: dict[str, Decimal] = {"KRW": Decimal(1)}
         holdings = []
         for h in result.get("items") or []:
             qty = _d(h.get("quantity"))
             if qty is None or qty <= 0:
                 continue
             market = "US" if h.get("marketCountry") == "US" else "KRX"
+            currency = str(h.get("currency") or ("USD" if market == "US" else "KRW"))
+            if currency not in rates:
+                rates[currency] = self._krw_rate(currency)
+            rate = rates[currency]
+            market_value = _d((h.get("marketValue") or {}).get("amount"))
+            pnl = _d((h.get("profitLoss") or {}).get("amount"))
             holdings.append(Holding(
                 symbol=f"{market}:{h.get('symbol')}", quantity=qty,
                 avg_entry_price=_d(h.get("averagePurchasePrice")) or Decimal(0), current_price=_d(h.get("lastPrice")),
-                market_value=_d(((h.get("marketValue") or {}).get("amount"))) if not isinstance((h.get("marketValue") or {}).get("amount"), dict) else _d((h.get("marketValue") or {}).get("amount", {}).get("krw")),
-                unrealized_pnl=_d(((h.get("profitLoss") or {}).get("amount"))) if not isinstance((h.get("profitLoss") or {}).get("amount"), dict) else _d((h.get("profitLoss") or {}).get("amount", {}).get("krw")),
+                market_value=market_value * rate if market_value is not None else None,
+                unrealized_pnl=pnl * rate if pnl is not None else None,
                 unrealized_pnl_rate=_d((h.get("profitLoss") or {}).get("rate")),  # 이미 소수 비율
             ))
         return holdings
@@ -201,6 +210,14 @@ class TossClient(StreamingBrokerClient):
                      quantity=_d(o.get("quantity")), limit_price=_d(o.get("price")), filled_quantity=_d(ex.get("filledQuantity")) or Decimal(0),
                      avg_fill_price=_d(ex.get("averageFilledPrice")), client_order_id=o.get("clientOrderId"),
                      submitted_at=_ts(o.get("orderedAt")), canceled_at=_ts(o.get("canceledAt")))
+
+    def _krw_rate(self, currency: str) -> Decimal:
+        """1 {currency} 의 원화 매매기준율 (GET /api/v1/exchange-rate, 약 5분마다 갱신)"""
+        result = self._call("GET", "/api/v1/exchange-rate", query={"baseCurrency": currency, "quoteCurrency": "KRW"}) or {}
+        rate = _d(result.get("midRate")) or _d(result.get("rate"))
+        if rate is None or rate <= 0:
+            raise BrokerApiError(200, None, f"토스 {currency}/KRW 환율을 받지 못했습니다")
+        return rate
 
     def _buying_power(self, currency: str) -> Decimal:
         return _d((self._call("GET", "/api/v1/buying-power", query={"currency": currency}, account=True) or {}).get("cashBuyingPower")) or Decimal(0)

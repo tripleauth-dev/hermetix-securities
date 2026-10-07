@@ -136,6 +136,17 @@ class BrokerConformanceTest {
     }
 
     @Test
+    fun `toss 미국 보유는 매매기준율로 원화 환산해 계좌 총평가에 더한다`() {
+        server.dispatcher = FixtureDispatcher(fixture("toss")["routes"], objectMapper)
+        val client = TossApiClient(TossApiProperties(baseUrl = baseUrl(), clientId = "c_conf", clientSecret = "s_conf", throttleMillis = 1), objectMapper)
+        val aapl = client.getHoldings().holdings.single { it.symbol == "US:AAPL" }
+        assertThat(aapl.currentPrice).isEqualByComparingTo("250") // 단가는 종목 통화 그대로
+        assertThat(aapl.marketValue).isEqualByComparingTo("700000")
+        assertThat(aapl.unrealizedPnl).isEqualByComparingTo("140000")
+        assertThat(client.getAccount().portfolioValue).isEqualByComparingTo("1910000")
+    }
+
+    @Test
     fun `kb 어댑터는 컨포먼스 시나리오를 통과한다 (공개 명세 픽스처, 실전 전용)`() = run("kb") {
         KbApiClient(KbApiProperties(baseUrl = baseUrl(), appKey = "k", appSecret = "s", throttleMillis = 1), objectMapper)
     }

@@ -69,6 +69,7 @@ import java.util.UUID
  * 공통 모델과의 차이 (문서상 확정):
  * - 시세(`/prices`)에 등락·거래량이 없다 → `change`/`changeRate` null, `volume` 0
  * - 예수금 엔드포인트가 없다 → `cash` 는 KRW 매수가능금액, `portfolioValue` 는 그 값 + 보유 원화환산 평가금액 합
+ * - 보유 종목 금액은 종목 통화(미국은 USD)로 온다 → 평가금액·손익은 매매기준율(`/api/v1/exchange-rate` midRate)로 원화 환산
  * - 체결 내역 엔드포인트가 없다 → 종료 주문의 `execution` 집계를 체결로 돌려준다 (fillId 없음)
  * - 취소·정정은 **새 orderId** 를 발급한다 → `cancelOrder` 는 원주문 ID 를 유지하고 PENDING_CANCEL 로 응답
  * - 캘린더는 KRX 합성(`KrxCalendar`) — 미국 종목만 다루는 전략은 `regularHoursOnly=false` 로 두고 직접 판단해야 한다
@@ -179,27 +180,31 @@ class TossApiClient internal constructor(
         )
     }
 
+    /** 평가금액·평가손익은 원화 — 미국 종목은 종목 통화(USD) 금액을 매매기준율(midRate)로 환산한다. 단가는 종목 통화 그대로. */
     override fun getHoldings(): HoldingsResponse = usage.measure("holdings") {
         val result = call(HttpMethod.GET, "/api/v1/holdings", account = true)
+        val rates = mutableMapOf("KRW" to BigDecimal.ONE)
         val holdings = result.path("items").mapNotNull { h ->
             val quantity = h.decimalOrNull("quantity") ?: return@mapNotNull null
             if (quantity.signum() <= 0) return@mapNotNull null
+            val market = if (h.path("marketCountry").asText() == "US") "US" else "KRX"
+            val currency = h.path("currency").asText().ifBlank { if (market == "US") "USD" else "KRW" }
+            val rate = rates.getOrPut(currency) { krwRate(currency) }
             Holding(
-                symbol = prefixed(h.path("symbol").asText(), if (h.path("marketCountry").asText() == "US") "US" else "KRX"),
+                symbol = prefixed(h.path("symbol").asText(), market),
                 quantity = quantity,
                 avgEntryPrice = h.decimalOrNull("averagePurchasePrice") ?: BigDecimal.ZERO, // 종목 통화 기준
                 currentPrice = h.decimalOrNull("lastPrice"),
-                marketValue = h.path("marketValue").path("amount").decimalOrNull("krw"),   // 원화환산
-                unrealizedPnl = h.path("profitLoss").path("amount").decimalOrNull("krw"),  // 원화환산
+                marketValue = h.path("marketValue").decimalOrNull("amount")?.multiply(rate),  // 원화환산
+                unrealizedPnl = h.path("profitLoss").decimalOrNull("amount")?.multiply(rate), // 원화환산
                 unrealizedPnlRate = h.path("profitLoss").decimalOrNull("rate"),            // 이미 소수 비율
             )
         }
         return HoldingsResponse(
             holdings = holdings,
             summary = HoldingsSummary(
-                totalMarketValue = result.path("marketValue").path("amount").decimalOrNull("krw")
-                    ?: holdings.fold(BigDecimal.ZERO) { acc, h -> acc + (h.marketValue ?: BigDecimal.ZERO) },
-                totalUnrealizedPnl = result.path("profitLoss").path("amount").decimalOrNull("krw"),
+                totalMarketValue = holdings.fold(BigDecimal.ZERO) { acc, h -> acc + (h.marketValue ?: BigDecimal.ZERO) },
+                totalUnrealizedPnl = holdings.fold(BigDecimal.ZERO) { acc, h -> acc + (h.unrealizedPnl ?: BigDecimal.ZERO) },
             ),
         )
     }
@@ -308,6 +313,14 @@ class TossApiClient internal constructor(
     }
 
     private fun prefixed(code: String, market: String): String = "$market:$code"
+
+    /** 1 [currency] 의 원화 매매기준율 (`GET /api/v1/exchange-rate`, 약 5분마다 갱신) */
+    private fun krwRate(currency: String): BigDecimal {
+        val result = call(HttpMethod.GET, "/api/v1/exchange-rate?baseCurrency=$currency&quoteCurrency=KRW")
+        val rate = result.decimalOrNull("midRate") ?: result.decimalOrNull("rate")
+        if (rate == null || rate.signum() <= 0) throw BrokerApiException(200, null, "토스 $currency/KRW 환율을 받지 못했습니다")
+        return rate
+    }
 
     private fun buyingPower(currency: String): BigDecimal =
         call(HttpMethod.GET, "/api/v1/buying-power?currency=$currency", account = true).decimal("cashBuyingPower")
