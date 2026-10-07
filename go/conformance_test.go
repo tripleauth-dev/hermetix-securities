@@ -178,6 +178,30 @@ func TestTossConformance(t *testing.T) {
 	})
 }
 
+// 미국 종목 평가금액·손익은 USD 로 오므로 매매기준율(midRate 1400)로 원화 환산해 계좌 총평가에 더한다 (실계좌 응답 형태)
+func TestTossUSHoldingsValuedInKRW(t *testing.T) {
+	_, srv := loadFixture(t, "toss")
+	defer srv.Close()
+	client := NewTossClient("c_conf", "s_conf", "").SetBaseURL(srv.URL).SetThrottle(time.Millisecond)
+	holdings, err := client.GetHoldings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aapl *Holding
+	for i := range holdings {
+		if holdings[i].Symbol == "US:AAPL" {
+			aapl = &holdings[i]
+		}
+	}
+	if aapl == nil || aapl.CurrentPrice.String() != "250" || aapl.MarketValue.String() != "700000" || aapl.UnrealizedPnl.String() != "140000" {
+		t.Fatalf("AAPL = %+v", aapl)
+	}
+	account, err := client.GetAccount()
+	if err != nil || account.PortfolioValue.String() != "1910000" {
+		t.Fatalf("portfolio = %v, err = %v", account.PortfolioValue, err)
+	}
+}
+
 func TestKbConformance(t *testing.T) {
 	runConformance(t, "kb", func(baseURL string) BrokerClient {
 		return NewKbClient("k", "s").SetBaseURL(baseURL).SetThrottle(time.Millisecond)

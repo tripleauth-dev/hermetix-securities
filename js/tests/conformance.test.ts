@@ -91,3 +91,18 @@ test("RateLimiter: 쓰로틀·백오프·Retry-After·재시도 소진", async (
 
   await assert.rejects(new RateLimiter(0, 1, () => 0, sleeper).execute(async () => { throw new RateLimitError(429, null, "x"); }), RateLimitError);
 });
+
+test("toss 미국 보유는 매매기준율로 원화 환산해 계좌 총평가에 더한다", async () => {
+  const restore = (globalThis as any).fetch;
+  (globalThis as any).fetch = fakeFetch(load("toss").routes);
+  try {
+    const client = new TossClient("c_conf", "s_conf", "", "http://toss.test", 1);
+    const aapl = (await client.getHoldings()).find((h) => h.symbol === "US:AAPL")!;
+    assert.equal(aapl.currentPrice?.toString(), "250"); // 단가는 종목 통화 그대로
+    assert.equal(aapl.marketValue?.toString(), "700000");
+    assert.equal(aapl.unrealizedPnl?.toString(), "140000");
+    assert.equal((await client.getAccount()).portfolioValue.toString(), "1910000");
+  } finally {
+    (globalThis as any).fetch = restore;
+  }
+});

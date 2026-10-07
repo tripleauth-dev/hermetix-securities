@@ -112,3 +112,14 @@ def test_rate_limiter_retries_with_backoff_and_retry_after():
 
     with pytest.raises(RateLimitError):
         RateLimiter(0, max_retries=1, sleep=sleep).execute(always_limited)
+
+
+def test_toss_us_holdings_are_valued_in_krw_at_mid_rate():
+    """미국 종목 평가금액·손익은 USD 로 오므로 매매기준율(midRate 1400)로 원화 환산해 계좌 총평가에 더한다 (실계좌 응답 형태)"""
+    http, _ = load("toss")
+    client = TossClient("c_conf", "s_conf", throttle_seconds=0.001)
+    client._http = http
+    aapl = next(h for h in client.get_holdings() if h.symbol == "US:AAPL")
+    assert (aapl.current_price, aapl.avg_entry_price) == (Decimal("250"), Decimal("200"))  # 단가는 종목 통화 그대로
+    assert (aapl.market_value, aapl.unrealized_pnl) == (Decimal("700000"), Decimal("140000"))
+    assert client.get_account().portfolio_value == Decimal("1000000") + Decimal("210000") + Decimal("700000")

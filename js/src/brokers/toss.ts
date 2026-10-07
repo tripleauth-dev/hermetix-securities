@@ -5,6 +5,7 @@
  * - 성공 {"result": …}, 에러 {"error": {requestId, code, message}}. client 당 유효 토큰 1개(재발급 시 이전 토큰 무효)
  * - 한 계좌로 KRX·미국을 다룬다 → 보유·주문 심볼은 KRX:005930 / US:AAPL 로 접두를 붙여 돌려준다
  * - 시세에 등락·거래량 없음, 예수금 없음(KRW 매수가능금액 대체), 체결 엔드포인트 없음(종료 주문 execution 집계), 취소는 새 orderId 발급, 캘린더 KRX 합성
+ * - 보유 평가금액·손익은 원화(미국 종목은 USD 금액을 매매기준율로 환산) → 계좌 총평가도 원화 한 숫자
  */
 import { instrumentBroker, type BrokerUsage } from "../telemetry.js";
 import { randomUUID } from "node:crypto";
@@ -27,7 +28,6 @@ const STATUS: Record<string, OrderStatus> = {
 };
 const num = (v: unknown): Decimal | null => { if (v === null || v === undefined || v === "") return null; try { return new Decimal(String(v)); } catch { return null; } };
 const ts = (v: unknown): Date | null => { if (!v) return null; const d = new Date(String(v)); return Number.isNaN(d.getTime()) ? null : d; };
-const krw = (v: unknown): Decimal | null => (v && typeof v === "object" ? num((v as Record<string, unknown>).krw) : num(v));
 
 export class TossClient implements StreamingBrokerClient {
   /** 실시간 — AsyncAPI 1.2.2. 계정당 연결 2개, 구독 100개, 선언 5회/초, 180초 무송신 시 끊김(60초 PING), 토큰은 핸드셰이크에서만 검사 (실측 전) */
@@ -103,17 +103,24 @@ export class TossClient implements StreamingBrokerClient {
     return { accountId: await this.account(), currency: "KRW", cash, portfolioValue: cash.plus(marketValue), status: "ACTIVE", name: null };
   }
 
+  /** 평가금액·평가손익은 원화 — 미국 종목은 종목 통화(USD) 금액을 매매기준율(midRate)로 환산한다. 단가는 종목 통화 그대로. */
   async getHoldings(): Promise<Holding[]> {
     const result = (await this.call("GET", "/api/v1/holdings", undefined, true)) as Record<string, unknown>;
+    const rates = new Map<string, Decimal>([["KRW", new Decimal(1)]]);
     const holdings: Holding[] = [];
     for (const h of ((result?.items ?? []) as Record<string, unknown>[])) {
       const quantity = num(h.quantity);
       if (!quantity || quantity.lte(0)) continue;
-      const mv = (h.marketValue ?? {}) as Record<string, unknown>;
+      const market = h.marketCountry === "US" ? "US" : "KRX";
+      const currency = String(h.currency || (market === "US" ? "USD" : "KRW"));
+      if (!rates.has(currency)) rates.set(currency, await this.krwRate(currency));
+      const rate = rates.get(currency)!;
+      const mv = num(((h.marketValue ?? {}) as Record<string, unknown>).amount);
       const pl = (h.profitLoss ?? {}) as Record<string, unknown>;
+      const pnl = num(pl.amount);
       holdings.push({
-        symbol: `${h.marketCountry === "US" ? "US" : "KRX"}:${h.symbol}`, quantity, avgEntryPrice: num(h.averagePurchasePrice) ?? new Decimal(0),
-        currentPrice: num(h.lastPrice), marketValue: krw(mv.amount), unrealizedPnl: krw(pl.amount), unrealizedPnlRate: num(pl.rate),
+        symbol: `${market}:${h.symbol}`, quantity, avgEntryPrice: num(h.averagePurchasePrice) ?? new Decimal(0),
+        currentPrice: num(h.lastPrice), marketValue: mv ? mv.times(rate) : null, unrealizedPnl: pnl ? pnl.times(rate) : null, unrealizedPnlRate: num(pl.rate),
       });
     }
     return holdings;
@@ -168,6 +175,14 @@ export class TossClient implements StreamingBrokerClient {
       filledQuantity: num(ex.filledQuantity) ?? new Decimal(0), avgFillPrice: num(ex.averageFilledPrice), clientOrderId: (o.clientOrderId as string) ?? null,
       submittedAt: ts(o.orderedAt), canceledAt: ts(o.canceledAt),
     };
+  }
+
+  /** 1 {currency} 의 원화 매매기준율 (GET /api/v1/exchange-rate, 약 5분마다 갱신) */
+  private async krwRate(currency: string): Promise<Decimal> {
+    const result = (await this.call("GET", `/api/v1/exchange-rate?baseCurrency=${currency}&quoteCurrency=KRW`)) as Record<string, unknown>;
+    const rate = num(result?.midRate) ?? num(result?.rate);
+    if (!rate || rate.lte(0)) throw new BrokerApiError(200, null, `토스 ${currency}/KRW 환율을 받지 못했습니다`);
+    return rate;
   }
 
   private async buyingPower(currency: string): Promise<Decimal> {
