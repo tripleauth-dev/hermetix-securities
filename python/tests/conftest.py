@@ -3,3 +3,10 @@
 from hermetix.telemetry import telemetry
 
 telemetry.transport = lambda body: None
+
+# DB 토큰 파일 캐시도 끈다 - 가짜 키로 받은 토큰이 ~/.hermetix/tokens 에 남거나 테스트끼리 공유되지 않도록
+import sys  # noqa: E402
+
+import hermetix.brokers.db  # noqa: E402,F401
+
+sys.modules["hermetix.brokers.db"].TOKEN_CACHE_DIR = None
