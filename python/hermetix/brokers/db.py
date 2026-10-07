@@ -6,7 +6,8 @@
 규약 (SDK 기준):
 - 모든 API 는 POST, 본문 {"In": {...}}, 응답 rsp_cd/rsp_msg + Out(객체 또는 배열) / Out1. TR 코드는 문서용, 경로로 식별
 - 헤더 authorization: Bearer + cont_yn/cont_key (+ 법인만 mac_address). appkey 헤더 없음
-- 토큰 POST /oauth2/token 은 form-urlencoded(appsecretkey), 24h, 발급 1분 1건
+- 토큰 POST /oauth2/token 은 form-urlencoded(appsecretkey), 24h, 발급 1분 1건(초과 시 403 + IGW00201 → RateLimitError).
+  발급 토큰은 ~/.hermetix/tokens/db-<키 해시>.json 에 저장해 프로세스 간 재사용하고, 발급 실패 후 60초는 서버에 다시 묻지 않는다
 - 운영/모의 같은 호스트 — 모의 키로만 분기. HTTP 200 + rsp_cd != 00000 이 업무 오류(이때 Out 없음)
 - 앱 20 TPS 이지만 잔고·체결 2 TPS, 예수금 1 TPS → 500ms 쓰로틀 + IGW00201 지수 백오프
 
@@ -14,10 +15,14 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from ..broker import KST, MarketStream, RateLimiter, StreamingBrokerClient, _Http, krx_calendar, krx_tick_round
 from ..errors import (
@@ -34,6 +39,56 @@ _MARKET_CLOSED_CODES = {"2611", "3589", "3590", "3563"}
 _INSUFFICIENT_CODES = {"1584", "2714", "2752", "M100"}
 _INVALID_ORDER_CODES = {"2706", "3180", "3181"}
 _ORDER_NOT_FOUND_CODES = {"3056", "3416"}
+
+# 토큰 발급은 1분 1건 (초과 시 HTTP 403 + IGW00201). 발급에 실패하면 이 시간 동안 서버에 다시 묻지 않는다
+TOKEN_FAILURE_COOLDOWN_SECONDS = 60.0
+# 토큰 만료 전 미리 갱신하는 여유
+TOKEN_REFRESH_MARGIN_SECONDS = 600.0
+
+
+def _default_token_cache_dir() -> Path | None:
+    try:
+        return Path.home() / ".hermetix" / "tokens"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# 발급 토큰 파일 캐시 위치 — 같은 키를 쓰는 여러 프로세스가 24시간 토큰을 나눠 쓴다 (공식 SDK 의 .dbsec_token.json 과 같은 목적).
+# 파일에는 토큰과 만료 시각만 담고 키는 담지 않는다. None 이면 파일 캐시를 쓰지 않는다 (테스트)
+TOKEN_CACHE_DIR: Path | None = _default_token_cache_dir()
+
+
+def _token_cache_path(app_key: str) -> Path | None:
+    if TOKEN_CACHE_DIR is None:
+        return None
+    return TOKEN_CACHE_DIR / f"db-{hashlib.sha256(app_key.encode()).hexdigest()[:16]}.json"
+
+
+def _load_cached_token(app_key: str) -> tuple[str, float] | None:
+    path = _token_cache_path(app_key)
+    try:
+        if path is None or not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        token, expires_at = data.get("access_token"), float(data.get("expires_at", 0))
+        return (token, expires_at) if token and expires_at - TOKEN_REFRESH_MARGIN_SECONDS > time.time() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _save_cached_token(app_key: str, token: str, expires_at: float) -> None:
+    path = _token_cache_path(app_key)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"access_token": token, "expires_at": expires_at}, f)
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        pass  # 캐시 저장 실패는 이번 호출에 영향을 주지 않는다
 
 
 def _d(value) -> Decimal | None:
@@ -95,6 +150,8 @@ class DbClient(StreamingBrokerClient):
         self._token: str | None = None
         self._token_expires_at = 0.0
         self._token_lock = threading.Lock()
+        # 마지막 발급 실패 (쿨다운 종료 시각, 예외) — 쿨다운 동안은 서버에 묻지 않고 같은 오류를 돌려준다
+        self._token_failure: tuple[float, BrokerApiError] | None = None
 
     # ------------------------------------------------------------------ market
 
@@ -290,23 +347,50 @@ class DbClient(StreamingBrokerClient):
         return DbMarketStream(self._ws_url, self._get_token, usage=self._usage)
 
     def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at - 600:
+        if self._token and time.time() < self._token_expires_at - TOKEN_REFRESH_MARGIN_SECONDS:
             return self._token
         with self._token_lock:
-            if self._token and time.time() < self._token_expires_at - 600:
+            now = time.time()
+            if self._token and now < self._token_expires_at - TOKEN_REFRESH_MARGIN_SECONDS:
                 return self._token
-            with self._usage.measure("auth"):
-                self._limiter.throttle.wait()
-                status, body = self._http.request(
-                    "POST", "/oauth2/token",
-                    form_body={"grant_type": "client_credentials", "appkey": self._app_key,
-                               "appsecretkey": self._app_secret, "scope": "oob"})  # JSON/appsecret 은 IGW00133
-                if status != 200 or not body.get("access_token"):
-                    code = body.get("rsp_cd") or body.get("error")
-                    raise AuthError(status, code, f"DB 토큰 발급 실패({code}): {body.get('rsp_msg') or body.get('error_description') or ''} (발급은 1분당 1회 제한)")
-                self._token = body["access_token"]
-                self._token_expires_at = time.time() + float(body.get("expires_in", 86400))
+            cached = _load_cached_token(self._app_key)
+            if cached:
+                self._token, self._token_expires_at = cached
                 return self._token
+            if self._token_failure and now < self._token_failure[0]:
+                raise self._cooldown_error(self._token_failure[1], self._token_failure[0] - now)
+            try:
+                token, expires_at = self._issue_token()
+            except BrokerApiError as e:
+                self._token_failure = (time.time() + TOKEN_FAILURE_COOLDOWN_SECONDS, e)
+                raise
+            self._token_failure = None
+            self._token, self._token_expires_at = token, expires_at
+            _save_cached_token(self._app_key, token, expires_at)
+            return token
+
+    def _issue_token(self) -> tuple[str, float]:
+        with self._usage.measure("auth"):
+            self._limiter.throttle.wait()
+            status, body = self._http.request(
+                "POST", "/oauth2/token",
+                form_body={"grant_type": "client_credentials", "appkey": self._app_key,
+                           "appsecretkey": self._app_secret, "scope": "oob"})  # JSON/appsecret 은 IGW00133
+            if status != 200 or not body.get("access_token"):
+                code = body.get("rsp_cd") or body.get("error")
+                detail = body.get("rsp_msg") or body.get("error_description") or ""
+                if code == "IGW00201" or status == 429:
+                    raise RateLimitError(status, code, f"DB 토큰 발급 유량 초과({code}): {detail} (발급은 1분당 1회 제한)",
+                                         TOKEN_FAILURE_COOLDOWN_SECONDS)
+                raise AuthError(status, code, f"DB 토큰 발급 실패({code}): {detail}")
+            return body["access_token"], time.time() + float(body.get("expires_in", 86400))
+
+    @staticmethod
+    def _cooldown_error(failure: BrokerApiError, remaining: float) -> BrokerApiError:
+        """쿨다운 중 재요청 — 서버에 묻지 않고 같은 종류의 오류를 남은 시간과 함께 돌려준다"""
+        if isinstance(failure, RateLimitError):
+            return RateLimitError(failure.http_status, failure.error_code, failure.message, remaining)
+        return failure
 
 
 def _remaining(row: dict) -> Decimal:
