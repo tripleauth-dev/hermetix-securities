@@ -80,6 +80,8 @@ dependencies {
 
 Python 실시간 스트림은 `pip install 'hermetix[stream]'` 입니다. 연결 계층만 쓰는 Kotlin 은 `hermetix-broker` 를 대신 넣습니다.
 
+Claude·Cursor 같은 AI 클라이언트에서 시세·계좌를 조회하려면 [hermetix-mcp](mcp/README.md) (로컬 MCP 서버, 조회 전용) 를 쓰세요.
+
 ## 빠른 시작: 연결 계층
 
 증권사는 ID 로 고르고, 자격 증명 키는 어느 증권사든 `api_key`·`api_secret`·`account` 세 개입니다. 증권사별 `account` 의 뜻과 추가 옵션은 [브로커 팩토리 규약](docs/broker-factory.md)에 있습니다.
