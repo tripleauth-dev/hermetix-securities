@@ -24,7 +24,7 @@ mcp/
     format.ts       <- 모델 → JSON (Decimal → 문자열, 계좌 마스킹)
     resources.ts    <- 문서 resource
     version.ts      <- package.json 버전
-  scripts/copy-docs.mjs <- 빌드 시 저장소 문서를 docs/ 로 복사
+  scripts/postbuild.mjs <- 빌드 후 문서 복사 + bin 실행 권한(755)
   tests/
 ```
 
@@ -53,7 +53,7 @@ mcp/
 - 값 대신 `"env:KIS_APPKEY"` 를 쓰면 환경변수에서 읽는다 (파일에 키를 두기 싫은 사용자용)
 - 파일 위치는 `HERMETIX_MCP_CONFIG` 환경변수로 바꿀 수 있다
 - 설정이 없거나 틀려도 서버는 뜬다 — tool 이 이유와 예시를 돌려준다. 틀린 별칭만 빠지고 나머지 별칭은 동작한다. 별칭이 하나뿐이면 `default` 생략 가능
-- `environment` 생략 시 PAPER (SDK 기본값과 같음). LIVE 계정도 조회는 허용한다 — v1 에 주문이 없으므로
+- `environment` 생략 시 브로커 기본값 (SDK 팩토리와 같음 — toss·kb 는 LIVE, 나머지는 PAPER). LIVE 계정도 조회는 허용한다 — v1 에 주문이 없으므로
 
 클라이언트 등록 예 (Claude Desktop / Claude Code):
 
