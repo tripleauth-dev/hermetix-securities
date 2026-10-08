@@ -62,7 +62,7 @@ def classify(failure: BaseException) -> str:
     if isinstance(failure, OrderNotFoundError):
         return "order_not_found"
     if isinstance(failure, BrokerApiError):
-        return "other"
+        return "server" if failure.http_status >= 500 else "other"
     if isinstance(failure, (OSError, TimeoutError, ConnectionError)):  # urllib.error.URLError, socket.timeout 포함
         return "network"
     cause = failure.__cause__

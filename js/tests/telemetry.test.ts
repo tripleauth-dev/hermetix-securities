@@ -127,7 +127,10 @@ test("예외 분류 표", () => {
   assert.equal(classifyError(new MarketClosedError(200, null, "x")), "market_closed");
   assert.equal(classifyError(new InvalidOrderError(400, null, "x")), "invalid_order");
   assert.equal(classifyError(new OrderNotFoundError(null, "x")), "order_not_found");
-  assert.equal(classifyError(new BrokerApiError(500, null, "x")), "other");
+  assert.equal(classifyError(new BrokerApiError(500, null, "x")), "server");
+  assert.equal(classifyError(new BrokerApiError(503, null, "x")), "server");
+  assert.equal(classifyError(new BrokerApiError(200, "1", "업무 거절")), "other");
+  assert.equal(classifyError(new AuthError(500, "EGW00123", "만료된 토큰")), "auth"); // 하위 분류가 우선
   assert.equal(classifyError(Object.assign(new Error("abort"), { name: "AbortError" })), "network");
   assert.equal(classifyError(new Error("wrap", { cause: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }) })), "network");
   assert.equal(classifyError(new Error("boom")), "other");

@@ -198,6 +198,9 @@ func ClassifyTelemetryError(err error) string {
 	case errors.As(err, &nf):
 		return "order_not_found"
 	case errors.As(err, &api):
+		if api.HTTPStatus >= 500 {
+			return "server"
+		}
 		return "other"
 	case errors.As(err, &nerr), errors.As(err, &uerr),
 		errors.Is(err, context.DeadlineExceeded), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):

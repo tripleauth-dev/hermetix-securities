@@ -131,7 +131,10 @@ class UsageTelemetryTest {
         assertThat(UsageTelemetry.classify(MarketClosedError(200, null, null))).isEqualTo("market_closed")
         assertThat(UsageTelemetry.classify(InvalidOrderError(400, null, null))).isEqualTo("invalid_order")
         assertThat(UsageTelemetry.classify(OrderNotFoundError(null, null))).isEqualTo("order_not_found")
-        assertThat(UsageTelemetry.classify(BrokerApiException(500, null, "x"))).isEqualTo("other")
+        assertThat(UsageTelemetry.classify(BrokerApiException(500, null, "x"))).isEqualTo("server")
+        assertThat(UsageTelemetry.classify(BrokerApiException(503, null, "x"))).isEqualTo("server")
+        assertThat(UsageTelemetry.classify(BrokerApiException(200, "1", "업무 거절"))).isEqualTo("other")
+        assertThat(UsageTelemetry.classify(AuthError(500, "EGW00123", "만료된 토큰"))).isEqualTo("auth") // 하위 분류가 우선
         assertThat(UsageTelemetry.classify(RuntimeException("wrap", java.net.ConnectException("refused")))).isEqualTo("network")
         assertThat(UsageTelemetry.classify(IllegalStateException("boom"))).isEqualTo("other")
     }

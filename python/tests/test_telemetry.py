@@ -142,7 +142,10 @@ def test_classify_table():
     assert classify(MarketClosedError(200, None, None)) == "market_closed"
     assert classify(InvalidOrderError(400, None, None)) == "invalid_order"
     assert classify(OrderNotFoundError(None, None)) == "order_not_found"
-    assert classify(BrokerApiError(500, None, "x")) == "other"
+    assert classify(BrokerApiError(500, None, "x")) == "server"
+    assert classify(BrokerApiError(503, None, "x")) == "server"
+    assert classify(BrokerApiError(200, "1", "업무 거절")) == "other"
+    assert classify(AuthError(500, "EGW00123", "만료된 토큰")) == "auth"  # 하위 분류가 우선
     wrapped = RuntimeError("wrap")
     wrapped.__cause__ = ConnectionRefusedError("refused")
     assert classify(wrapped) == "network"
