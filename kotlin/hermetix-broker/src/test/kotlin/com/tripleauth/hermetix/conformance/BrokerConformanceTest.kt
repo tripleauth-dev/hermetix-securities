@@ -142,7 +142,8 @@ class BrokerConformanceTest {
         val aapl = client.getHoldings().holdings.single { it.symbol == "US:AAPL" }
         assertThat(aapl.currentPrice).isEqualByComparingTo("250") // 단가는 종목 통화 그대로
         assertThat(aapl.marketValue).isEqualByComparingTo("700000")
-        assertThat(aapl.unrealizedPnl).isEqualByComparingTo("140000")
+        assertThat(aapl.unrealizedPnl).isEqualByComparingTo("100") // 손익은 USD 그대로 — 현재 환율로 환산하면 환차손익이 빠진다
+        assertThat(aapl.currency).isEqualTo("USD")
         assertThat(client.getAccount().portfolioValue).isEqualByComparingTo("1910000")
     }
 

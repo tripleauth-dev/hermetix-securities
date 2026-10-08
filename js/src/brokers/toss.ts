@@ -120,7 +120,7 @@ export class TossClient implements StreamingBrokerClient {
       const pnl = num(pl.amount);
       holdings.push({
         symbol: `${market}:${h.symbol}`, quantity, avgEntryPrice: num(h.averagePurchasePrice) ?? new Decimal(0),
-        currentPrice: num(h.lastPrice), marketValue: mv ? mv.times(rate) : null, unrealizedPnl: pnl ? pnl.times(rate) : null, unrealizedPnlRate: num(pl.rate),
+        currentPrice: num(h.lastPrice), marketValue: mv ? mv.times(rate) : null, unrealizedPnl: pnl, unrealizedPnlRate: num(pl.rate), currency,
       });
     }
     return holdings;

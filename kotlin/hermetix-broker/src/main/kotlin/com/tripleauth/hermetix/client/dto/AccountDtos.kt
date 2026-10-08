@@ -24,6 +24,8 @@ data class Holding(
     val marketValue: BigDecimal?,
     val unrealizedPnl: BigDecimal?,
     val unrealizedPnlRate: BigDecimal?,
+    /** 종목 거래 통화 — avgEntryPrice·currentPrice·unrealizedPnl 의 단위. null 이면 계좌 통화. marketValue 는 항상 계좌 통화 */
+    val currency: String? = null,
 )
 
 data class HoldingsSummary(

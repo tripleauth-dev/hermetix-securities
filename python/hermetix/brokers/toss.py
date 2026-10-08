@@ -126,7 +126,9 @@ class TossClient(StreamingBrokerClient):
         return Account(account_id=self._account(), currency="KRW", cash=cash, portfolio_value=cash + market_value)
 
     def get_holdings(self) -> list[Holding]:
-        """평가금액·평가손익은 원화 - 미국 종목은 종목 통화(USD) 금액을 매매기준율(midRate)로 환산한다. 단가는 종목 통화 그대로."""
+        """평가금액은 원화 - 미국 종목은 USD 평가금액을 매매기준율(midRate)로 환산한다.
+        단가·평가손익은 종목 통화 그대로 (currency). 손익을 현재 환율로 환산하면 매수 시점 환율과의 차이(환차손익)가 빠져
+        토스 앱의 원화 손익과 달라진다 - 토스 API 는 종목별 원화 원금을 주지 않는다."""
         result = self._call("GET", "/api/v1/holdings", account=True) or {}
         rates: dict[str, Decimal] = {"KRW": Decimal(1)}
         holdings = []
@@ -145,8 +147,9 @@ class TossClient(StreamingBrokerClient):
                 symbol=f"{market}:{h.get('symbol')}", quantity=qty,
                 avg_entry_price=_d(h.get("averagePurchasePrice")) or Decimal(0), current_price=_d(h.get("lastPrice")),
                 market_value=market_value * rate if market_value is not None else None,
-                unrealized_pnl=pnl * rate if pnl is not None else None,
-                unrealized_pnl_rate=_d((h.get("profitLoss") or {}).get("rate")),  # 이미 소수 비율
+                unrealized_pnl=pnl,
+                unrealized_pnl_rate=_d((h.get("profitLoss") or {}).get("rate")),  # 이미 소수 비율, 종목 통화 기준
+                currency=currency,
             ))
         return holdings
 

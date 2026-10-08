@@ -34,6 +34,8 @@ data class HoldingPnl(
     val marketValue: BigDecimal?,
     val unrealizedPnl: BigDecimal?,
     val unrealizedPnlRate: BigDecimal?,
+    /** 종목 거래 통화 (평가손익 단위). null 이면 계좌 통화 */
+    val currency: String? = null,
 )
 
 class PnlService(
@@ -46,7 +48,10 @@ class PnlService(
         val holdings = brokerClient.getHoldings().holdings
 
         val totalMarketValue = holdings.sumOfOrZero { it.marketValue }
-        val totalUnrealizedPnl = holdings.sumOfOrZero { it.unrealizedPnl }
+        // 평가손익 합계는 계좌 통화 종목만 — 외화 종목 손익은 단위가 달라 각 holding 에만 있다
+        val totalUnrealizedPnl = holdings
+            .filter { it.currency == null || it.currency == account.currency }
+            .sumOfOrZero { it.unrealizedPnl }
 
         val totalReturnRate = initialCapital
             ?.takeIf { it > BigDecimal.ZERO }
@@ -70,6 +75,7 @@ class PnlService(
                     marketValue = it.marketValue,
                     unrealizedPnl = it.unrealizedPnl,
                     unrealizedPnlRate = it.unrealizedPnlRate,
+                    currency = it.currency,
                 )
             },
         )

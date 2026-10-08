@@ -911,7 +911,8 @@ func Pnl(broker BrokerClient, initialCapital *decimal.Decimal) (PnlReport, error
 		if h.MarketValue != nil {
 			totalMv = totalMv.Add(*h.MarketValue)
 		}
-		if h.UnrealizedPnl != nil {
+		// 평가손익 합계는 계좌 통화 종목만 — 외화 종목 손익은 단위가 달라 각 Holding 에만 있다
+		if h.UnrealizedPnl != nil && (h.Currency == "" || h.Currency == account.Currency) {
 			totalPnl = totalPnl.Add(*h.UnrealizedPnl)
 		}
 	}

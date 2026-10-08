@@ -136,6 +136,9 @@ class Holding:
     market_value: Decimal | None = None
     unrealized_pnl: Decimal | None = None
     unrealized_pnl_rate: Decimal | None = None
+    # 종목 거래 통화 — avg_entry_price·current_price·unrealized_pnl 의 단위. None 이면 계좌 통화.
+    # market_value 는 항상 계좌 통화 (계좌 총평가에 더하는 값)
+    currency: str | None = None
 
 
 @dataclass(frozen=True)

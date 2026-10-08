@@ -14,7 +14,7 @@ class PnlServiceTest {
 
     private val brokerClient = mockk<BrokerClient>()
 
-    private fun holding(symbol: String, marketValue: String?, pnl: String?) = Holding(
+    private fun holding(symbol: String, marketValue: String?, pnl: String?, currency: String? = null) = Holding(
         symbol = symbol,
         quantity = BigDecimal.ONE,
         avgEntryPrice = BigDecimal("100"),
@@ -22,6 +22,7 @@ class PnlServiceTest {
         marketValue = marketValue?.let { BigDecimal(it) },
         unrealizedPnl = pnl?.let { BigDecimal(it) },
         unrealizedPnlRate = null,
+        currency = currency,
     )
 
     @Test
@@ -41,6 +42,23 @@ class PnlServiceTest {
         assertThat(report.totalUnrealizedPnl).isEqualByComparingTo(BigDecimal("30"))
         assertThat(report.totalReturnRate).isNull()
         assertThat(report.holdings).hasSize(3)
+    }
+
+    @Test
+    fun `외화 종목 손익은 합계에서 빼고 평가액은 더한다`() {
+        every { brokerClient.getAccount() } returns Fixtures.account().copy(currency = "KRW")
+        every { brokerClient.getHoldings() } returns HoldingsResponse(
+            holdings = listOf(
+                holding("KRX:005930", "210000", "6000", currency = "KRW"),
+                holding("US:AAPL", "700000", "100", currency = "USD"), // 손익 100 USD — 원화 합계에 섞지 않는다
+            ),
+        )
+
+        val report = PnlService(brokerClient, initialCapital = null).report()
+
+        assertThat(report.totalMarketValue).isEqualByComparingTo(BigDecimal("910000"))
+        assertThat(report.totalUnrealizedPnl).isEqualByComparingTo(BigDecimal("6000"))
+        assertThat(report.holdings.map { it.currency }).containsExactly("KRW", "USD")
     }
 
     @Test
