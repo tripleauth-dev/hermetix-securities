@@ -116,3 +116,10 @@ test("증권사 인증 실패는 원인을 한 줄로 알려 준다", async () =
     restore();
   }
 });
+
+test("maskAccount: 앞 4자만 남기고, 4자 이하 순번은 그대로", async () => {
+  const { maskAccount } = await import("../src/format.js");
+  assert.equal(maskAccount("50199202"), "5019****");
+  assert.equal(maskAccount("3"), "3");
+  assert.equal(maskAccount(null), null);
+});

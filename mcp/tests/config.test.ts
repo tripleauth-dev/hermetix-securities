@@ -35,7 +35,7 @@ test("env: 참조는 환경변수에서 읽고, 비어 있으면 그 별칭만 �
   }));
   assert.deepEqual([...cfg.accounts.keys()], ["ok"]);
   assert.match(cfg.invalid.get("missing") ?? "", /apiSecret 가 가리키는 환경변수 HERMETIX_MCP_TEST_NOPE 가 비어 있습니다/);
-  assert.equal(cfg.defaultAlias, "ok"); // 쓸 수 있는 별칭이 하나면 기본값
+  assert.equal(cfg.defaultAlias, null); // 별칭이 둘(정상+오류)이고 default 가 없다
 });
 
 test("팩토리 검증 에러는 별칭과 함께, 값 없이 전달한다", () => {
@@ -63,7 +63,7 @@ test("default 별칭·권한 경고", () => {
 
   const noDefault = loadConfig(writeConfig({ accounts: { a: kis, b: kis } }));
   assert.equal(noDefault.defaultAlias, null);
-  assert.deepEqual(loadConfig(writeConfig({ accounts: { a: kis }, default: "zzz" })).warnings, [`"default" 별칭 'zzz' 을 쓸 수 없습니다`]);
+  assert.deepEqual(loadConfig(writeConfig({ accounts: { a: kis }, default: "zzz" })).warnings, [`"default" 별칭 'zzz' 이 accounts 에 없습니다`]);
 });
 
 test("별칭이 여럿이고 default 가 없으면 account 를 요구한다", async () => {
@@ -74,6 +74,17 @@ test("별칭이 여럿이고 default 가 없으면 account 를 요구한다", as
     assert.match(r.text, /account 를 지정하세요. 쓸 수 있는 별칭: a, b/);
     const unknown = await mcp.call("get_account", { account: "c" });
     assert.match(unknown.text, /모르는 별칭 'c'/);
+  } finally {
+    await mcp.close();
+  }
+});
+
+test("기본 별칭이 설정 오류로 빠지면 account 를 생략한 호출이 그 이유를 받는다", async () => {
+  const mcp = await connect(writeConfig({ accounts: { toss: { ...kis, apiSecret: "env:HERMETIX_MCP_TEST_EMPTY" } }, default: "toss" }));
+  try {
+    const r = await mcp.call("get_account");
+    assert.equal(r.isError, true);
+    assert.match(r.text, /^설정 오류 — 'toss': apiSecret 가 가리키는 환경변수 HERMETIX_MCP_TEST_EMPTY 가 비어 있습니다/);
   } finally {
     await mcp.close();
   }
