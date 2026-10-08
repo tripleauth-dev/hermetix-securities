@@ -100,6 +100,8 @@ export interface Holding {
   marketValue?: Decimal | null;
   unrealizedPnl?: Decimal | null;
   unrealizedPnlRate?: Decimal | null;
+  /** 종목 거래 통화 — avgEntryPrice·currentPrice·unrealizedPnl 의 단위. 생략이면 계좌 통화. marketValue 는 항상 계좌 통화 (계좌 총평가에 더하는 값) */
+  currency?: string | null;
 }
 
 export interface CreateOrderRequest {

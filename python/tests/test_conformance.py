@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from hermetix.engine import pnl_report
 from hermetix import (
     ConformanceScenario, DbClient, KbClient, KisClient, KiwoomClient, LsClient, NextClient, NhClient, RateLimitError,
     RateLimiter, TossClient, verify_broker_conformance,
@@ -115,11 +116,16 @@ def test_rate_limiter_retries_with_backoff_and_retry_after():
 
 
 def test_toss_us_holdings_are_valued_in_krw_at_mid_rate():
-    """미국 종목 평가금액·손익은 USD 로 오므로 매매기준율(midRate 1400)로 원화 환산해 계좌 총평가에 더한다 (실계좌 응답 형태)"""
+    """미국 종목 평가금액은 USD 로 오므로 매매기준율(midRate 1400)로 원화 환산해 계좌 총평가에 더한다 (실계좌 응답 형태).
+    평가손익은 USD 그대로 - 현재 환율로 환산하면 환차손익이 빠진다"""
     http, _ = load("toss")
     client = TossClient("c_conf", "s_conf", throttle_seconds=0.001)
     client._http = http
     aapl = next(h for h in client.get_holdings() if h.symbol == "US:AAPL")
     assert (aapl.current_price, aapl.avg_entry_price) == (Decimal("250"), Decimal("200"))  # 단가는 종목 통화 그대로
-    assert (aapl.market_value, aapl.unrealized_pnl) == (Decimal("700000"), Decimal("140000"))
+    assert (aapl.market_value, aapl.unrealized_pnl, aapl.currency) == (Decimal("700000"), Decimal("100"), "USD")
+    samsung = next(h for h in client.get_holdings() if h.symbol == "KRX:005930")
+    assert (samsung.unrealized_pnl, samsung.currency) == (Decimal("6000"), "KRW")
+    report = pnl_report(client)  # 손익 합계는 원화 종목만 (USD 손익 100 을 섞지 않는다)
+    assert (report["total_market_value"], report["total_unrealized_pnl"]) == (Decimal("910000"), Decimal("6000"))
     assert client.get_account().portfolio_value == Decimal("1000000") + Decimal("210000") + Decimal("700000")

@@ -80,12 +80,14 @@ export function loadConfig(path = defaultConfigPath(), factory: Factory = client
     }
   }
 
+  // 설정 오류로 빠진 별칭도 기본값으로 남긴다 — account 를 생략한 호출이 "별칭 없음" 대신 그 오류 이유를 받게
   const declared = (raw as { default?: unknown }).default;
+  const known = (alias: string) => result.accounts.has(alias) || result.invalid.has(alias);
   if (typeof declared === "string" && declared) {
-    if (result.accounts.has(declared)) result.defaultAlias = declared;
-    else result.warnings.push(`"default" 별칭 '${declared}' 을 쓸 수 없습니다`);
-  } else if (result.accounts.size === 1) {
-    result.defaultAlias = [...result.accounts.keys()][0];
+    if (known(declared)) result.defaultAlias = declared;
+    else result.warnings.push(`"default" 별칭 '${declared}' 이 accounts 에 없습니다`);
+  } else if (result.accounts.size + result.invalid.size === 1) {
+    result.defaultAlias = [...result.accounts.keys(), ...result.invalid.keys()][0];
   }
   return result;
 }

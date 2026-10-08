@@ -193,12 +193,17 @@ func TestTossUSHoldingsValuedInKRW(t *testing.T) {
 			aapl = &holdings[i]
 		}
 	}
-	if aapl == nil || aapl.CurrentPrice.String() != "250" || aapl.MarketValue.String() != "700000" || aapl.UnrealizedPnl.String() != "140000" {
+	if aapl == nil || aapl.CurrentPrice.String() != "250" || aapl.MarketValue.String() != "700000" || aapl.UnrealizedPnl.String() != "100" || aapl.Currency != "USD" {
 		t.Fatalf("AAPL = %+v", aapl)
 	}
 	account, err := client.GetAccount()
 	if err != nil || account.PortfolioValue.String() != "1910000" {
 		t.Fatalf("portfolio = %v, err = %v", account.PortfolioValue, err)
+	}
+	// 손익 합계는 원화 종목만 (USD 손익 100 을 섞지 않는다)
+	report, err := Pnl(client, nil)
+	if err != nil || report.TotalMarketValue.String() != "910000" || report.TotalUnrealizedPnl.String() != "6000" {
+		t.Fatalf("pnl = %+v, err = %v", report, err)
 	}
 }
 

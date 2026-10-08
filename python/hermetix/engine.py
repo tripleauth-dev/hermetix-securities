@@ -571,7 +571,8 @@ def pnl_report(broker: BrokerClient, initial_capital: Decimal | None = None) -> 
     account = broker.get_account()
     holdings = broker.get_holdings()
     total_mv = sum((h.market_value or Decimal(0)) for h in holdings)
-    total_pnl = sum((h.unrealized_pnl or Decimal(0)) for h in holdings)
+    # 평가손익 합계는 계좌 통화 종목만 - 외화 종목 손익(currency 가 다름)은 단위가 달라 각 holding 에만 있다
+    total_pnl = sum((h.unrealized_pnl or Decimal(0)) for h in holdings if h.currency in (None, account.currency))
     total_return = None
     if initial_capital and initial_capital > 0:
         total_return = (account.portfolio_value - initial_capital) / initial_capital

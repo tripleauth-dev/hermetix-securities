@@ -6,6 +6,7 @@ import {
   DbClient, Decimal, KbClient, KisClient, KiwoomClient, LsClient, NextClient, NhClient, RateLimitError, RateLimiter, TossClient,
   verifyBrokerConformance,
 } from "../src/index.js";
+import { pnlReport } from "../src/engine.js";
 import type { BrokerClient } from "../src/index.js";
 
 interface Route { method?: string; path?: string; header?: [string, string]; status?: number; body: unknown; }
@@ -92,7 +93,7 @@ test("RateLimiter: 쓰로틀·백오프·Retry-After·재시도 소진", async (
   await assert.rejects(new RateLimiter(0, 1, () => 0, sleeper).execute(async () => { throw new RateLimitError(429, null, "x"); }), RateLimitError);
 });
 
-test("toss 미국 보유는 매매기준율로 원화 환산해 계좌 총평가에 더한다", async () => {
+test("toss 미국 보유 평가금액은 매매기준율로 원화 환산해 계좌 총평가에 더하고, 손익은 USD 그대로 둔다", async () => {
   const restore = (globalThis as any).fetch;
   (globalThis as any).fetch = fakeFetch(load("toss").routes);
   try {
@@ -100,7 +101,11 @@ test("toss 미국 보유는 매매기준율로 원화 환산해 계좌 총평가
     const aapl = (await client.getHoldings()).find((h) => h.symbol === "US:AAPL")!;
     assert.equal(aapl.currentPrice?.toString(), "250"); // 단가는 종목 통화 그대로
     assert.equal(aapl.marketValue?.toString(), "700000");
-    assert.equal(aapl.unrealizedPnl?.toString(), "140000");
+    assert.equal(aapl.unrealizedPnl?.toString(), "100"); // 손익은 USD 그대로 — 현재 환율로 환산하면 환차손익이 빠진다
+    assert.equal(aapl.currency, "USD");
+    const report = await pnlReport(client); // 손익 합계는 원화 종목만 (USD 손익 100 을 섞지 않는다)
+    assert.equal(report.totalMarketValue.toString(), "910000");
+    assert.equal(report.totalUnrealizedPnl.toString(), "6000");
     assert.equal((await client.getAccount()).portfolioValue.toString(), "1910000");
   } finally {
     (globalThis as any).fetch = restore;

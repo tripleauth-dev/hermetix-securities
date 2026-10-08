@@ -282,8 +282,10 @@ func (c *TossClient) GetHoldings() (_ []Holding, err error) {
 		}
 		holdings = append(holdings, Holding{
 			Symbol: market + ":" + str(h["symbol"]), Quantity: *qty, AvgEntryPrice: d(h["averagePurchasePrice"]), CurrentPrice: dOrNil(h["lastPrice"]),
-			MarketValue: tossKRW(tossObj(h["marketValue"])["amount"], rate), UnrealizedPnl: tossKRW(tossObj(h["profitLoss"])["amount"], rate),
-			UnrealizedPnlRate: dOrNil(tossObj(h["profitLoss"])["rate"]), // 이미 소수 비율
+			// 평가금액만 원화 환산. 손익은 종목 통화 그대로 — 현재 환율로 환산하면 환차손익이 빠져 토스 앱 원화 손익과 달라진다
+			MarketValue: tossKRW(tossObj(h["marketValue"])["amount"], rate), UnrealizedPnl: dOrNil(tossObj(h["profitLoss"])["amount"]),
+			UnrealizedPnlRate: dOrNil(tossObj(h["profitLoss"])["rate"]), // 이미 소수 비율, 종목 통화 기준
+			Currency:          currency,
 		})
 	}
 	return holdings, nil

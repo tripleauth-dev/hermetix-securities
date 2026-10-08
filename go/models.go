@@ -142,6 +142,9 @@ type Holding struct {
 	MarketValue       *decimal.Decimal
 	UnrealizedPnl     *decimal.Decimal
 	UnrealizedPnlRate *decimal.Decimal
+	// Currency 는 종목 거래 통화 — AvgEntryPrice·CurrentPrice·UnrealizedPnl 의 단위. 빈 문자열이면 계좌 통화.
+	// MarketValue 는 항상 계좌 통화 (계좌 총평가에 더하는 값)
+	Currency string
 }
 
 type CreateOrderRequest struct {

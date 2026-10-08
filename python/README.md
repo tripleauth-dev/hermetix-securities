@@ -6,7 +6,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 버전 | 0.11.6 |
+| 버전 | 0.11.7 |
 | Python | 3.10 이상 |
 | 런타임 의존성 | 없음 |
 | 실시간 스트림 | `websockets`, `cryptography` (선택 설치) |
@@ -233,7 +233,7 @@ report = pnl_report(broker, initial_capital=Decimal(20_000_000))
 print(report["portfolio_value"], report["total_unrealized_pnl"], report["total_return_rate"])
 ```
 
-`cash`, `portfolio_value`, `total_market_value`, `total_unrealized_pnl`, `total_return_rate`, `holdings` 를 돌려줍니다.
+`cash`, `portfolio_value`, `total_market_value`, `total_unrealized_pnl`, `total_return_rate`, `holdings` 를 돌려줍니다. `total_unrealized_pnl` 은 계좌 통화 종목만 더합니다 — 토스 미국 종목처럼 `holding.currency` 가 다른 종목의 손익은 그 통화 그대로 각 holding 에 있습니다.
 
 ## 사용량 텔레메트리
 

@@ -17,10 +17,13 @@ export function toPlain(value: unknown): unknown {
   return value;
 }
 
-/** 앞 4자만 남긴다 — 어느 계좌인지 구분은 되고 전체 번호는 대화에 남지 않게 */
+/**
+ * 앞 4자만 남긴다 — 어느 계좌인지 구분은 되고 전체 번호는 대화에 남지 않게.
+ * 4자 이하는 계좌번호가 아니라 순번(토스 accountSeq 등)이라 그대로 둔다
+ */
 export function maskAccount(id: string | null | undefined): string | null {
   if (!id) return null;
-  if (id.length <= 4) return "*".repeat(id.length);
+  if (id.length <= 4) return id;
   return id.slice(0, 4) + "*".repeat(id.length - 4);
 }
 

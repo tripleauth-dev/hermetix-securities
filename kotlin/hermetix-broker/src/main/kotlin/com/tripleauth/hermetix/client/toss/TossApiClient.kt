@@ -180,7 +180,10 @@ class TossApiClient internal constructor(
         )
     }
 
-    /** 평가금액·평가손익은 원화 — 미국 종목은 종목 통화(USD) 금액을 매매기준율(midRate)로 환산한다. 단가는 종목 통화 그대로. */
+    /**
+     * 평가금액은 원화 — 미국 종목은 USD 평가금액을 매매기준율(midRate)로 환산한다. 단가·평가손익은 종목 통화 그대로(currency).
+     * 손익을 현재 환율로 환산하면 매수 시점 환율과의 차이(환차손익)가 빠져 토스 앱 원화 손익과 달라진다 — API 는 종목별 원화 원금을 주지 않는다.
+     */
     override fun getHoldings(): HoldingsResponse = usage.measure("holdings") {
         val result = call(HttpMethod.GET, "/api/v1/holdings", account = true)
         val rates = mutableMapOf("KRW" to BigDecimal.ONE)
@@ -196,15 +199,17 @@ class TossApiClient internal constructor(
                 avgEntryPrice = h.decimalOrNull("averagePurchasePrice") ?: BigDecimal.ZERO, // 종목 통화 기준
                 currentPrice = h.decimalOrNull("lastPrice"),
                 marketValue = h.path("marketValue").decimalOrNull("amount")?.multiply(rate),  // 원화환산
-                unrealizedPnl = h.path("profitLoss").decimalOrNull("amount")?.multiply(rate), // 원화환산
+                unrealizedPnl = h.path("profitLoss").decimalOrNull("amount"),                 // 종목 통화
                 unrealizedPnlRate = h.path("profitLoss").decimalOrNull("rate"),            // 이미 소수 비율
+                currency = currency,
             )
         }
         return HoldingsResponse(
             holdings = holdings,
             summary = HoldingsSummary(
                 totalMarketValue = holdings.fold(BigDecimal.ZERO) { acc, h -> acc + (h.marketValue ?: BigDecimal.ZERO) },
-                totalUnrealizedPnl = holdings.fold(BigDecimal.ZERO) { acc, h -> acc + (h.unrealizedPnl ?: BigDecimal.ZERO) },
+                // 원화 종목만 — 외화 종목 손익은 단위가 다르다
+                totalUnrealizedPnl = holdings.filter { it.currency == "KRW" }.fold(BigDecimal.ZERO) { acc, h -> acc + (h.unrealizedPnl ?: BigDecimal.ZERO) },
             ),
         )
     }

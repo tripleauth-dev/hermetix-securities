@@ -617,7 +617,10 @@ export async function pnlReport(broker: BrokerClient, initialCapital?: Decimal):
   const holdings = await broker.getHoldings();
   const zero = new Decimal(0);
   const totalMv = holdings.reduce((acc, h) => acc.plus(h.marketValue ?? zero), zero);
-  const totalPnl = holdings.reduce((acc, h) => acc.plus(h.unrealizedPnl ?? zero), zero);
+  // 평가손익 합계는 계좌 통화 종목만 — 외화 종목 손익(currency 가 다름)은 단위가 달라 각 holding 에만 있다
+  const totalPnl = holdings
+    .filter((h) => !h.currency || h.currency === account.currency)
+    .reduce((acc, h) => acc.plus(h.unrealizedPnl ?? zero), zero);
   const totalReturn = initialCapital?.gt(0)
     ? account.portfolioValue.minus(initialCapital).div(initialCapital)
     : null;
