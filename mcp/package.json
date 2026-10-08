@@ -1,6 +1,6 @@
 {
   "name": "hermetix-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "hermetix MCP 서버 - AI 클라이언트가 국내 증권사 시세·계좌를 조회하게 한다 (로컬 stdio 전용, 조회만)",
   "keywords": ["mcp", "trading", "stock", "korea", "broker", "kis", "kiwoom"],
   "homepage": "https://github.com/tripleauth-dev/hermetix-securities/tree/main/mcp",
