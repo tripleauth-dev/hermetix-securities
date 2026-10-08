@@ -1,0 +1,43 @@
+{
+  "name": "hermetix-mcp",
+  "version": "0.1.0",
+  "description": "hermetix MCP 서버 - AI 클라이언트가 국내 증권사 시세·계좌를 조회하게 한다 (로컬 stdio 전용, 조회만)",
+  "keywords": ["mcp", "trading", "stock", "korea", "broker", "kis", "kiwoom"],
+  "homepage": "https://github.com/tripleauth-dev/hermetix-securities/tree/main/mcp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tripleauth-dev/hermetix-securities.git",
+    "directory": "mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/tripleauth-dev/hermetix-securities/issues"
+  },
+  "type": "module",
+  "bin": {
+    "hermetix-mcp": "dist/src/index.js"
+  },
+  "files": [
+    "dist/src",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prepublishOnly": "npm run build",
+    "build": "tsc && node scripts/copy-docs.mjs",
+    "test": "npm run build && node --test --import ./dist/tests/setup.js \"dist/tests/*.test.js\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "hermetix": "^0.11.6",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.5.0"
+  },
+  "license": "MIT"
+}
