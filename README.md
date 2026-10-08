@@ -74,7 +74,7 @@ holdings = client.get_holdings()
 repositories { mavenCentral(); maven("https://jitpack.io") }
 
 dependencies {
-    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.5")
+    implementation("com.github.tripleauth-dev.hermetix-securities:hermetix-engine:0.11.6")
 }
 ```
 
@@ -275,6 +275,7 @@ hermetix:
 
 | 버전 | 내용 |
 |---|---|
+| 0.11.6 | 텔레메트리 에러 분류에 `server`(증권사 HTTP 5xx) 추가 — API 현황 장애율이 인증 실패·주문 거절 같은 호출자 쪽 에러를 빼고 증권사 쪽 장애(`network`·`server`)만 세도록 |
 | 0.11.5 | 토스 미국 보유 종목 평가금액·손익을 매매기준율로 원화 환산 — 계좌 총평가에 달러가 섞이던 문제 수정 (Kotlin 은 미국 종목이 빠지던 문제) |
 | 0.11.4 | 토큰 수명주기 공용화(8개 증권사) — 발급 유량 초과를 `RateLimitError` 로, 발급 실패 60초 쿨다운, 토큰 파일 캐시 `~/.hermetix/tokens`, 거부 토큰 폐기 후 1회 재발급 |
 | 0.11.3 | 실측 제보 도구 `python -m hermetix.verify`, 검증 상태 3단계 |

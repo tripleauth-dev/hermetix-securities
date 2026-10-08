@@ -89,7 +89,12 @@ Hermetix SDK(Kotlin·Python·JS·Go)는 **어느 증권사가 얼마나 쓰이�
 | `invalid_order` | InvalidOrderError |
 | `order_not_found` | OrderNotFoundError |
 | `network` | 연결·타임아웃 등 HTTP 응답을 받지 못한 경우 |
-| `other` | 그 외 모든 예외 |
+| `server` | 위 분류에 해당하지 않는 BrokerApiError 중 HTTP 상태 ≥ 500 (증권사 서버 오류) |
+| `other` | 그 외 모든 예외 (HTTP 200 + 업무 오류 코드 같은 증권사 거절 포함) |
+
+위에서부터 처음 맞는 분류 하나를 쓴다 — 5xx 라도 AuthError 등 하위 분류가 있으면 그 분류다.
+API 현황의 장애율은 증권사 쪽 원인인 `network` + `server` 만 센다. 나머지는 호출자 쪽 원인(키·유량·주문 내용·장 시간)이거나 증권사가 정상적으로 거절한 경우라 분류별 건수로만 보여 준다.
+`server` 는 0.11.6 부터 보낸다 — 그 이전 SDK 는 5xx 도 `other` 로 보낸다.
 
 ## 전송 규칙
 

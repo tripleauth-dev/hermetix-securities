@@ -63,7 +63,7 @@ from .models import (
 )
 from .strategy import Buy, Cancel, Sell, Signal, Strategy, StrategyContext, StrategySpec, TickTrigger
 
-__version__ = "0.11.5"
+__version__ = "0.11.6"
 
 __all__ = [
     "brokers", "client", "next", "kis", "kiwoom", "nh", "ls", "db", "toss", "kb",

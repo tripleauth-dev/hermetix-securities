@@ -36,7 +36,7 @@ const LATENCY_SAMPLES = 256;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type ErrorClass =
-  | "rate_limit" | "auth" | "market_closed" | "insufficient_funds" | "invalid_order" | "order_not_found" | "network" | "other";
+  | "rate_limit" | "auth" | "market_closed" | "insufficient_funds" | "invalid_order" | "order_not_found" | "network" | "server" | "other";
 
 function readSdkVersion(): string {
   try {
@@ -109,7 +109,7 @@ export function classifyError(err: unknown): ErrorClass {
   if (err instanceof InsufficientFundsError) return "insufficient_funds";
   if (err instanceof InvalidOrderError) return "invalid_order";
   if (err instanceof OrderNotFoundError) return "order_not_found";
-  if (err instanceof BrokerApiError) return "other";
+  if (err instanceof BrokerApiError) return err.httpStatus >= 500 ? "server" : "other";
   if (err && typeof err === "object") {
     const e = err as { name?: string; code?: string; cause?: unknown; message?: string };
     if (e.name === "AbortError" || e.name === "TimeoutError") return "network";

@@ -113,7 +113,7 @@ object UsageTelemetry {
         is InsufficientFundsError -> "insufficient_funds"
         is InvalidOrderError -> "invalid_order"
         is OrderNotFoundError -> "order_not_found"
-        is BrokerApiException -> "other"
+        is BrokerApiException -> if (failure.httpStatus >= 500) "server" else "other"
         is java.io.IOException, is java.net.http.HttpTimeoutException, is org.springframework.web.client.ResourceAccessException -> "network"
         else -> if (failure.cause != null && failure.cause !== failure) classify(failure.cause!!) else "other"
     }

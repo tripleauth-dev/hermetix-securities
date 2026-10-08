@@ -244,7 +244,8 @@ func TestTelemetryClassifyTable(t *testing.T) {
 		"insufficient_funds": &InsufficientFundsError{},
 		"invalid_order":      &InvalidOrderError{},
 		"order_not_found":    newOrderNotFoundError("", ""),
-		"other":              &BrokerAPIError{HTTPStatus: 500},
+		"server":             &BrokerAPIError{HTTPStatus: 500},
+		"other":              &BrokerAPIError{HTTPStatus: 200, Code: "1"},
 		"network":            &net.OpError{Op: "dial", Err: errors.New("refused")},
 	}
 	for want, err := range cases {
