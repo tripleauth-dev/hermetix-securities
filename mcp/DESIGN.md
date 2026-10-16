@@ -50,7 +50,8 @@ mcp/
 ```
 
 - 항목 모양은 SDK 팩토리 자격 증명 그대로 (`docs/broker-factory.md`) — `broker` 만 추가. 검증도 팩토리(`hermetix.client`)에 맡긴다 (모르는 키·빈 시크릿은 기동 시 에러, 에러 메시지에 값은 싣지 않는다)
-- 값 대신 `"env:KIS_APPKEY"` 를 쓰면 환경변수에서 읽는다 (파일에 키를 두기 싫은 사용자용)
+- 값 대신 `"env:KIS_APPKEY"` 를 쓰면 환경변수에서, `"keychain:KIS_APPKEY"` 를 쓰면 macOS 키체인(서비스 `hermetix`, 계정 `KIS_APPKEY`, `/usr/bin/security find-generic-password -w`)에서 읽는다. README 는 macOS 에서 키체인을 기본 안내로 둔다 — **위협 모델**: AI 클라이언트(Claude Code·Cursor)는 파일 도구가 있어 사용자 지시나 프롬프트 인젭션으로 설정 파일을 읽어 대화에 올릴 수 있다. 파일에 키가 없으면 이 경로가 막힌다. macOS 에서 `apiKey`/`apiSecret` 이 참조가 아닌 평문이면 기동 시 경고. 다른 플랫폼의 `keychain:` 은 그 별칭만 거부하고 `env:` 를 안내한다 (Windows 자격 증명 관리자·libsecret 지원은 요청이 있을 때)
+- 공급망: README 는 클라이언트 설정에 `hermetix-mcp@<버전>` 고정을 안내한다. 배포는 `.github/workflows/mcp-publish.yml` 이 `mcp/v*` 태그에서 테스트 후 `npm publish --provenance` 로 한다 (npm 트러스티드 퍼블리셔 등록이 1회 필요)
 - 파일 위치는 `HERMETIX_MCP_CONFIG` 환경변수로 바꿀 수 있다
 - 설정이 없거나 틀려도 서버는 뜬다 — tool 이 이유와 예시를 돌려준다. 틀린 별칭만 빠지고 나머지 별칭은 동작한다. 별칭이 하나뿐이면 `default` 생략 가능
 - `environment` 생략 시 브로커 기본값 (SDK 팩토리와 같음 — toss·kb 는 LIVE, 나머지는 PAPER). LIVE 계정도 조회는 허용한다 — v1 에 주문이 없으므로
@@ -116,6 +117,7 @@ AI 가 hermetix 로 **코드를 짤 때** 쓰는 문서. 패키지에 함께 넣
 - **클라이언트 재사용** — 별칭당 SDK 클라이언트 하나를 프로세스 수명 동안 쓴다. 토큰은 SDK 의 파일 캐시(`~/.hermetix/tokens`)가 관리하므로 다른 hermetix 프로세스와 토큰을 나눠 쓴다 (KIS·DB 발급 1분 1건 제한 대응)
 - **텔레메트리** — SDK 에 내장돼 있어 MCP 호출도 그대로 집계된다 (`sdk.language = "js"`). MCP 경유를 따로 구분하려면 페이로드 스키마 변경이 필요하다 → 열린 질문
 - **종료** — 클라이언트가 stdin 을 닫으면 이벤트 루프가 비고, SDK 의 `beforeExit` 훅이 텔레메트리 마지막 전송(최대 3초) 후 종료
+- **키체인과 HOME** — `security` 는 `HOME` 기준으로 로그인 키체인을 찾는다. `HOME` 을 바꿔 띄우면(테스트 `setup.ts` 처럼) `keychain:` 참조는 "항목 없음" 이 된다. 그래서 키체인 테스트는 실제 `security` 를 부르지 않고 리더를 주입한다. 실측은 2026-10-16 macOS 에서 임시 항목으로 왕복 확인
 
 ## 테스트
 
@@ -123,7 +125,7 @@ AI 가 hermetix 로 **코드를 짤 때** 쓰는 문서. 패키지에 함께 넣
 - MCP SDK 의 in-memory transport 로 `tools/list`·`tools/call` 왕복
 - 출력에 키·시크릿·전체 계좌번호가 없는지 검사하는 테스트 (고유 키 문자열로 검사)
 - 테스트는 HOME 을 임시 디렉터리로 바꾸고 텔레메트리 전송을 끈다 (`tests/setup.ts`)
-- 설정 로딩: 모르는 키, 빈 시크릿, `env:` 참조 누락, 파일 권한 경고
+- 설정 로딩: 모르는 키, 빈 시크릿, `env:` 참조 누락, `keychain:` 참조(리더 주입: 성공·항목 없음·이름 없음·비 macOS), 평문 경고, 파일 권한 경고. 키체인 리더가 돌려준 값이 invalid 사유·경고 어디에도 없는지 검사
 
 ## 주문 (v2, 범위 밖)
 

@@ -1,0 +1,39 @@
+# hermetix-mcp 를 npm 에 provenance 서명과 함께 배포한다.
+# 트리거: `mcp/v0.1.3` 같은 태그 푸시. 태그 버전과 mcp/package.json 버전이 다르면 중단.
+# 사전 준비(1회): npmjs.com → hermetix-mcp 패키지 → Settings → Trusted Publisher 에
+#   GitHub Actions / tripleauth-dev/hermetix-securities / 워크플로 파일 mcp-publish.yml 을 등록한다.
+#   그러면 NPM_TOKEN 시크릿 없이 OIDC 로 배포되고, 패키지 페이지에 "Built and signed on GitHub Actions" 가 붙는다.
+name: mcp-publish
+
+on:
+  push:
+    tags:
+      - "mcp/v*"
+
+permissions:
+  contents: read
+  id-token: write   # npm provenance (Sigstore) 에 필요
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: 태그와 package.json 버전 일치 확인
+        run: |
+          tag_version="${GITHUB_REF_NAME#mcp/v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "태그 $tag_version ≠ package.json $pkg_version" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm test
+      - run: npm publish --provenance --access public
