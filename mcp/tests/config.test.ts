@@ -63,7 +63,7 @@ test("default 별칭·권한 경고", () => {
 
   const noDefault = loadConfig(writeConfig({ accounts: { a: kis, b: kis } }));
   assert.equal(noDefault.defaultAlias, null);
-  assert.deepEqual(loadConfig(writeConfig({ accounts: { a: kis }, default: "zzz" })).warnings, [`"default" 별칭 'zzz' 이 accounts 에 없습니다`]);
+  assert.ok(loadConfig(writeConfig({ accounts: { a: kis }, default: "zzz" })).warnings.includes(`"default" 별칭 'zzz' 이 accounts 에 없습니다`));
 });
 
 test("별칭이 여럿이고 default 가 없으면 account 를 요구한다", async () => {
@@ -88,4 +88,52 @@ test("기본 별칭이 설정 오류로 빠지면 account 를 생략한 호출�
   } finally {
     await mcp.close();
   }
+});
+
+test("keychain: 참조는 키체인 리더로 읽고, 값은 어디에도 싣지 않는다", () => {
+  const seen: string[] = [];
+  const keychain = (service: string, account: string) => {
+    seen.push(`${service}/${account}`);
+    return account === "KIS_KEY" ? "kc-key-value-9999" : account === "KIS_SECRET" ? "kc-secret-value-8888" : null;
+  };
+  const cfg = loadConfig(writeConfig({
+    accounts: {
+      ok: { ...kis, apiKey: "keychain:KIS_KEY", apiSecret: "keychain:KIS_SECRET" },
+      missing: { ...kis, apiKey: "keychain:KIS_KEY", apiSecret: "keychain:NOPE" },
+      blank: { ...kis, apiKey: "keychain:", apiSecret: "keychain:KIS_SECRET" },
+    },
+  }), { keychain, platform: "darwin" });
+  assert.deepEqual([...cfg.accounts.keys()], ["ok"]);
+  assert.deepEqual(seen, ["hermetix/KIS_KEY", "hermetix/KIS_SECRET", "hermetix/KIS_KEY", "hermetix/NOPE"]);
+  assert.match(cfg.invalid.get("missing") ?? "", /apiSecret 가 가리키는 키체인 항목 NOPE 이 없습니다 — security add-generic-password -s hermetix -a NOPE -w/);
+  assert.match(cfg.invalid.get("blank") ?? "", /apiKey 의 keychain: 뒤에 항목 이름이 없습니다/);
+  const everything = [...cfg.invalid.values(), ...cfg.warnings].join("\n");
+  assert.ok(!everything.includes("kc-key-value-9999") && !everything.includes("kc-secret-value-8888"));
+  // 모든 비밀이 참조라 평문 경고가 없다
+  assert.ok(!cfg.warnings.some((w) => w.includes("평문")));
+});
+
+test("keychain: 참조는 macOS 외에서는 그 별칭만 거부하고 env: 를 안내한다", () => {
+  const cfg = loadConfig(writeConfig({ accounts: { a: { ...kis, apiKey: "keychain:KIS_KEY" } } }), {
+    keychain: () => { throw new Error("호출되면 안 된다"); },
+    platform: "linux",
+  });
+  assert.equal(cfg.accounts.size, 0);
+  assert.match(cfg.invalid.get("a") ?? "", /keychain: 참조는 macOS 에서만 됩니다 — env: 를 쓰세요/);
+});
+
+test("macOS 에서 apiKey/apiSecret 이 평문이면 경고하고, env:·keychain: 참조만이면 경고하지 않는다", () => {
+  process.env.HERMETIX_MCP_TEST_KEY = "from-env-key";
+  const plain = loadConfig(writeConfig({ accounts: { a: kis } }), { platform: "darwin" });
+  assert.ok(plain.warnings.some((w) => /평문/.test(w) && /keychain:/.test(w)));
+  assert.ok(!plain.warnings.join("\n").includes("k-value-1234"));
+
+  const refs = loadConfig(writeConfig({ accounts: { a: { ...kis, apiKey: "env:HERMETIX_MCP_TEST_KEY", apiSecret: "keychain:S" } } }), {
+    keychain: () => "kc", platform: "darwin",
+  });
+  assert.equal(refs.accounts.size, 1);
+  assert.ok(!refs.warnings.some((w) => /평문/.test(w)));
+
+  const linux = loadConfig(writeConfig({ accounts: { a: kis } }), { platform: "linux" });
+  assert.ok(!linux.warnings.some((w) => /평문/.test(w)));
 });

@@ -8,13 +8,61 @@ Claude Desktop·Claude Code·Cursor 같은 AI 클라이언트에서 **내 증권
 - **조회 전용** — 주문을 넣거나 취소하는 기능이 없습니다. AI 가 실수로 주문할 수 없습니다
 - **8개 증권사, 같은 사용법** — 넥스트·한국투자·키움·NH·LS·DB·토스·KB
 
+## 키는 어디로 가는가
+
+```
+내 PC ─────────────────────────────────────────────┐          증권사
+│  macOS 키체인 / env 파일 / ~/.hermetix/mcp.json    │
+│          │ 키                                      │
+│          ▼                                         │   키 + 조회 요청
+│  hermetix-mcp (로컬 프로세스, stdio) ───────────────┼──────────────────▶  증권사 Open API
+│          ▲                                         │
+│          │ 조회 결과만 (키·토큰 없음, 계좌번호 마스킹)  │
+│          ▼                                         │
+│  Claude Desktop / Claude Code / Cursor             │
+└───────────────────────────────────────────────────┘
+          │ 대화 내용 (조회 결과 포함, 키 없음)
+          ▼
+   AI 제공자 (Anthropic 등)                          hermetix 서버: 키·계좌·종목 받지 않음 (익명 사용량 집계만)
+```
+
+hermetix-mcp 는 내 PC 에서 도는 프로세스라서, 키는 **내 기기에서 증권사로만** 갑니다. 원격 서버 모드는 만들지 않았고 만들 계획도 없습니다. 원격으로 가면 키를 누군가의 서버에 맡겨야 하기 때문입니다.
+
+그래도 남는 위험은 숨기지 않고 적어 둡니다.
+
+| 남는 위험 | 왜 생기나 | 줄이는 방법 |
+|---|---|---|
+| AI 클라이언트가 설정 파일을 읽을 수 있음 | Claude Code·Cursor 는 파일 도구가 있어, 사용자가 시키거나 프롬프트 인젝션이 걸리면 `~/.hermetix/mcp.json` 을 읽어 대화에 올릴 수 있음 | 키를 파일에 쓰지 말고 **`keychain:`(macOS) 또는 `env:` 참조**로 두기 (아래 1단계). 평문이면 기동 시 경고 |
+| npm 공급망 | `npx -y hermetix-mcp` 는 npm 의 최신 패키지를 받아 실행함. 패키지가 탈취되면 키에 닿는 코드가 돎 | 클라이언트 설정에 **버전을 고정**(`hermetix-mcp@0.1.3`)하고 올릴 때 직접 바꾸기. 0.1.3 부터 GitHub Actions 에서 npm provenance 서명으로 배포 |
+| 조회 전용이지만 키는 주문 권한을 가짐 | 증권사 대부분이 조회 전용 키를 따로 주지 않음. MCP 가 주문 코드를 갖지 않아도, 키가 새면 주문이 가능 | 모의투자 키로 시작하기. 실전 키는 증권사 포털에서 **IP 제한**을 걸고, 쓰지 않는 키는 폐기 |
+
 ## 시작하기 (5분)
 
 준비물: **Node.js 22 이상** (`node -v` 로 확인), 쓰려는 증권사의 Open API 키.
 
-### 1단계 — 키 파일 만들기
+### 1단계 — 키 보관하고 계좌 파일 만들기
 
-`~/.hermetix/mcp.json` 을 만들고 계좌를 적습니다.
+**macOS (권장) — 키는 키체인에, 파일에는 이름만.** 터미널에서 두 번 실행하면 각각 키 입력을 숨겨서 받습니다.
+
+```bash
+security add-generic-password -s hermetix -a KIS_APPKEY -w
+security add-generic-password -s hermetix -a KIS_APPSECRET -w
+```
+
+`~/.hermetix/mcp.json` 에는 키체인 항목 **이름**을 적습니다.
+
+```json
+{
+  "accounts": {
+    "kis-paper": { "broker": "kis", "apiKey": "keychain:KIS_APPKEY", "apiSecret": "keychain:KIS_APPSECRET", "account": "계좌번호 앞 8자리" }
+  },
+  "default": "kis-paper"
+}
+```
+
+이 파일에는 키가 없으니 AI 가 파일을 읽어도 새는 것이 없습니다. 키를 바꿀 때는 `security delete-generic-password -s hermetix -a KIS_APPKEY` 후 다시 추가합니다.
+
+**Windows·Linux, 또는 가장 단순하게** — 값을 직접 적고 권한을 조입니다. 리눅스는 `env:` 참조(아래 "키를 파일에 두기 싫을 때")가 더 안전합니다.
 
 ```json
 {
@@ -25,21 +73,22 @@ Claude Desktop·Claude Code·Cursor 같은 AI 클라이언트에서 **내 증권
 }
 ```
 
-다른 사용자가 읽지 못하게 권한을 바꿉니다.
-
 ```bash
 chmod 600 ~/.hermetix/mcp.json
 ```
 
 - `accounts` 의 키(`kis-paper`)는 내가 정하는 **별칭**입니다. 여러 계좌를 등록하면 대화에서 별칭으로 고릅니다
 - `default` 는 계좌를 말하지 않았을 때 쓸 별칭입니다. 계좌가 하나면 생략해도 됩니다
+- macOS 에서 키가 평문으로 있으면 기동 로그에 경고가 남습니다. 동작은 합니다
 
 ### 2단계 — AI 클라이언트에 등록하기
+
+버전을 `@0.1.3` 처럼 **고정해서** 등록합니다. 그래야 npm 에 올라온 새 패키지가 내 동의 없이 실행되지 않습니다. 새 버전은 [릴리스 노트](https://github.com/tripleauth-dev/hermetix-securities/tags)를 보고 숫자를 직접 바꿉니다.
 
 **Claude Code** — 터미널에서 한 줄:
 
 ```bash
-claude mcp add hermetix -- npx -y hermetix-mcp
+claude mcp add hermetix -- npx -y hermetix-mcp@0.1.3
 ```
 
 **Claude Desktop** — 설정 → 개발자 → **설정 편집** 으로 `claude_desktop_config.json` 을 열고 `mcpServers` 에 추가한 뒤, 앱을 **⌘Q 로 완전히 종료했다가** 다시 엽니다.
@@ -47,7 +96,7 @@ claude mcp add hermetix -- npx -y hermetix-mcp
 ```json
 {
   "mcpServers": {
-    "hermetix": { "command": "npx", "args": ["-y", "hermetix-mcp"] }
+    "hermetix": { "command": "npx", "args": ["-y", "hermetix-mcp@0.1.3"] }
   }
 }
 ```
@@ -97,9 +146,21 @@ claude mcp add hermetix -- npx -y hermetix-mcp
 
 대화에서 "토스 계좌 보유 종목" 처럼 말하면 AI 가 `toss` 별칭을 고릅니다.
 
-### 키를 파일에 두기 싫을 때 — 환경변수
+### 키를 파일에 두기 싫을 때
 
-값 자리에 `"env:변수이름"` 을 쓰면 환경변수에서 읽습니다.
+**macOS 키체인 — `keychain:항목이름`.** 서비스 이름 `hermetix` 로 저장한 일반 암호 항목을 읽습니다 (1단계 참고). 항목이 없으면 그 별칭만 쓸 수 없고, 다른 별칭은 정상 동작합니다. 토스처럼 키가 두 개뿐이면 이렇게 됩니다.
+
+```bash
+security add-generic-password -s hermetix -a TOSS_CLIENT_ID -w
+security add-generic-password -s hermetix -a TOSS_CLIENT_SECRET -w
+```
+```json
+"toss": { "broker": "toss", "apiKey": "keychain:TOSS_CLIENT_ID", "apiSecret": "keychain:TOSS_CLIENT_SECRET" }
+```
+
+`security` 로 추가한 항목은 `security` 명령 자신에게 읽기 권한이 있어 확인 창이 뜨지 않습니다. 키체인 접근(Keychain Access) 앱으로 만든 항목은 첫 실행 때 "항상 허용" 을 눌러야 할 수 있습니다.
+
+**환경변수 — `env:변수이름`.** 리눅스·윈도우, 또는 CI 환경용입니다.
 
 ```json
 "toss": { "broker": "toss", "apiKey": "env:TOSS_CLIENT_ID", "apiSecret": "env:TOSS_CLIENT_SECRET" }
@@ -112,7 +173,7 @@ claude mcp add hermetix -- npx -y hermetix-mcp
   "mcpServers": {
     "hermetix": {
       "command": "/bin/sh",
-      "args": ["-c", "set -a; . ~/.hermetix.env; set +a; exec npx -y hermetix-mcp"]
+      "args": ["-c", "set -a; . ~/.hermetix.env; set +a; exec npx -y hermetix-mcp@0.1.3"]
     }
   }
 }
@@ -158,6 +219,9 @@ hermetix 문서(증권사별 지원 기능, 자격 증명 규약, 전략 작성 
 |---|---|
 | "설정 파일이 없습니다" | `~/.hermetix/mcp.json` 이 없거나 경로가 다릅니다 |
 | "환경변수 … 가 비어 있습니다" | `env:` 로 가리킨 변수가 실행 환경에 없습니다. 위 env 파일 방식으로 등록하거나 값을 직접 넣으세요 |
+| "키체인 항목 … 이 없습니다" | `security add-generic-password -s hermetix -a 이름 -w` 로 아직 넣지 않았거나 이름이 다릅니다. `security find-generic-password -s hermetix -a 이름` 으로 있는지 확인하세요 |
+| "keychain: 참조는 macOS 에서만 됩니다" | 리눅스·윈도우에서는 키체인을 읽지 않습니다. `env:` 참조로 바꾸세요 |
+| 로그에 "키가 평문으로 있습니다" | 동작에는 문제가 없습니다. 1단계의 키체인 방식으로 옮기면 경고가 사라집니다 |
 | "모르는 항목 '…'" | 항목 이름 오타입니다. 위 표와 브로커 팩토리 문서의 이름을 쓰세요 |
 | "인증 실패" | 키가 틀렸거나 모의/실전(`environment`)이 키와 다릅니다 |
 | "호출 한도 초과" | 증권사 초당 호출 제한입니다. 잠시 뒤 다시 물어보세요 |
@@ -170,9 +234,14 @@ Claude Desktop 로그 위치 (macOS): `~/Library/Logs/Claude/mcp-server-hermetix
 
 ## 보안
 
-- 키는 `~/.hermetix/mcp.json`(또는 env 파일)에만 있고, AI 와의 대화·hermetix 서버로 가지 않습니다
+경계와 남는 위험은 맨 위 ["키는 어디로 가는가"](#키는-어디로-가는가)에 있습니다. 구현이 지키는 것:
+
+- 키는 macOS 키체인, env 파일, 또는 `~/.hermetix/mcp.json` 에만 있고, tool 입력·출력·에러 메시지 어디에도 싣지 않습니다. 설정 오류 메시지도 별칭과 항목 이름만 말합니다 (테스트로 검사)
+- 계좌번호는 앞 4자리만 보입니다
 - 접근 토큰은 SDK 와 같은 `~/.hermetix/tokens/` 에 캐시됩니다 (토큰과 만료 시각만, 키 없음)
-- 파일 권한이 600 이 아니면 실행 시 경고를 남깁니다
+- 파일 권한이 600 이 아니거나 macOS 에서 키가 평문이면 실행 시 경고를 남깁니다
+- 원격(HTTP) 모드, OAuth, 주문 tool 은 코드에 없습니다
+- 키체인 읽기는 `/usr/bin/security` 절대경로로 실행하고 그 stderr 는 버립니다 (실패 메시지에 항목 이름이 섞이는 것을 막기 위해)
 
 ## 사용량 데이터
 
